@@ -3,6 +3,12 @@ import sys
 import json
 from dotenv import load_dotenv
 
+# Windows 콘솔의 기본 코드페이지(cp949)는 이모지를 인코딩하지 못해
+# print() 호출 시 스크립트가 죽는다. UTF-8로 강제 전환.
+if sys.stdout.encoding.lower() != "utf-8":
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+
 # 프로젝트 최상위 경로를 파이썬 경로에 추가하여 임포트 에러를 방지합니다.
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 

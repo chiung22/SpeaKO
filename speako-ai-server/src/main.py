@@ -1,3 +1,11 @@
+import sys
+
+# Windows 콘솔의 기본 코드페이지(cp949)는 이모지를 인코딩하지 못해
+# print() 호출 시 서버가 부팅도 되기 전에 죽는다. UTF-8로 강제 전환.
+if sys.stdout.encoding.lower() != "utf-8":
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
