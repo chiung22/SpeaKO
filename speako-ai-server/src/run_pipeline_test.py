@@ -11,10 +11,11 @@ from clova.full_generation.generator import FullScriptGenerator
 from etri.etri_client import EtriLanguageAnalyzer
 from g2p.g2p_client import G2pConverter
 from tts.clova_voice_client import ClovaVoiceClient
+from utils.ppt_extractor import PptExtractor
 
 # Azure 모듈은 이전 단계에서 누락되었을 수 있으므로 예외 처리하여 안전하게 임포트합니다.
 try:
-    from azure.azure_client import PronunciationEvaluator
+    from azure_speech.azure_client import PronunciationEvaluator
     azure_available = True
 except ImportError:
     azure_available = False
@@ -31,6 +32,7 @@ def run_integrated_pipeline():
     # [모듈 초기화]
     # ==========================================
     print("\n⏳ 각 AI 모듈을 초기화하고 있습니다...")
+    ppt_extractor = PptExtractor()
     clova_gen = FullScriptGenerator()
     etri_analyzer = EtriLanguageAnalyzer()
     g2p_converter = G2pConverter()
@@ -39,12 +41,27 @@ def run_integrated_pipeline():
     print("✅ 모든 모듈 초기화 완료!\n")
 
     # ==========================================
+    # [STEP 0] PPT 구조화 추출
+    # ==========================================
+    print("-" * 60)
+    print("🎯 [STEP 0] PPT 구조화 추출 테스트 (python-pptx)")
+    sample_pptx_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "sample.pptx")
+
+    if os.path.exists(sample_pptx_path):
+        ppt_data = ppt_extractor.extract_structured_data(sample_pptx_path)
+        print("✨ [추출 성공] 데이터:")
+        print(json.dumps(ppt_data, indent=2, ensure_ascii=False))
+    else:
+        print(f"⚠️ 샘플 PPT 파일({sample_pptx_path})이 없어 이 단계는 건너뜁니다.")
+        print("⚠️ (테스트용 .pptx 파일을 프로젝트 루트에 sample.pptx로 두면 이 단계도 검증됩니다.)")
+
+    # ==========================================
     # [STEP 1] 대본 생성 (HyperCLOVA X)
     # ==========================================
     print("-" * 60)
     print("🎯 [STEP 1] 대본 생성 테스트 (HyperCLOVA X)")
     sample_ppt_text = "메타버스와 인프라 구축의 특징을 살펴봅시다."
-    
+
     script_result = clova_gen.generate_full_script(
         ppt_text=sample_ppt_text,
         presentation_time=1,
