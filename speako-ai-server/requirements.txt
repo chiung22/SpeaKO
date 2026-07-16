@@ -1,0 +1,8 @@
+fastapi==0.138.2
+uvicorn[standard]==0.49.0
+python-dotenv==1.2.2
+requests==2.34.2
+python-pptx==1.0.2
+g2pkk==0.1.2
+azure-cognitiveservices-speech==1.42.0
+python-multipart==0.0.20

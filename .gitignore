@@ -14,6 +14,11 @@ __pycache__/
 .env.*
 !.env.example
 
+# AI 클라이언트 테스트 실행 시 생성되는 임시 음성/평가 아티팩트
+*.mp3
+*.wav
+.pytest_cache/
+
 # OS files
 .DS_Store
 Thumbs.db

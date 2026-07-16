@@ -1,16 +1,18 @@
-from fastapi import FastAPI, UploadFile, File, Form
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
 import os
 import shutil
+import uuid
 
 # 1. 분리해둔 AI 클라이언트 모듈들 임포트
 from clova.full_generation.generator import FullScriptGenerator
 from clova.partial_generation.generator import PartialScriptGenerator
 from etri.etri_client import EtriLanguageAnalyzer
 from g2p.g2p_client import G2pConverter
-from azure.azure_client import PronunciationEvaluator
+from azure_speech.azure_client import PronunciationEvaluator
+from utils.ppt_extractor import PptExtractor
 
 # 2. FastAPI 앱 인스턴스 생성
 app = FastAPI(
@@ -38,6 +40,7 @@ partial_generator = PartialScriptGenerator()
 etri_analyzer = EtriLanguageAnalyzer()
 g2p_converter = G2pConverter()
 azure_evaluator = PronunciationEvaluator()
+ppt_extractor = PptExtractor()
 
 # ==========================================
 # 📦 프론트엔드와 통신할 데이터 모델 (JSON 바디 정의)
@@ -69,25 +72,43 @@ class AnalysisRequest(BaseModel):
 async def root():
     return {"message": "SpeaKO AI 서버가 정상적으로 실행 중입니다!"}
 
+@app.post("/api/ppt/extract")
+async def extract_ppt(file: UploadFile = File(...)):
+    """[PPT 구조화 추출 API] 업로드된 PPTX 파일에서 슬라이드별 텍스트와 주제/키워드를 추출합니다."""
+    temp_file_path = f"temp_{uuid.uuid4().hex}_{file.filename}"
+    try:
+        with open(temp_file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        result = ppt_extractor.extract_structured_data(temp_file_path)
+
+        if not result["slides"]:
+            raise HTTPException(status_code=422, detail="PPT에서 텍스트를 추출하지 못했습니다.")
+
+        return {"success": True, "data": result}
+    finally:
+        if os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
+
 @app.post("/api/script/full")
 async def create_full_script(request: FullScriptRequest):
     """[대본 전체 생성 API]"""
     result = full_generator.generate_full_script(request.ppt_text, request.presentation_time, request.style)
-    
-    if result:
-        return {"success": True, "data": result}
-    else:
-        return {"success": False, "message": "대본 생성에 실패했습니다."}
+
+    if not result:
+        raise HTTPException(status_code=502, detail="대본 생성에 실패했습니다.")
+
+    return {"success": True, "data": result}
 
 @app.post("/api/script/partial")
 async def create_partial_script(request: PartialScriptRequest):
     """[대본 부분 재생성 API]"""
     result = partial_generator.generate_partial_script(request.original_script, request.target_slide, request.feedback)
-    
-    if result:
-        return {"success": True, "data": result}
-    else:
-        return {"success": False, "message": "대본 부분 재생성에 실패했습니다."}
+
+    if not result:
+        raise HTTPException(status_code=502, detail="대본 부분 재생성에 실패했습니다.")
+
+    return {"success": True, "data": result}
 
 @app.post("/api/analysis/words")
 async def extract_and_convert_words(request: AnalysisRequest):
@@ -111,9 +132,10 @@ async def evaluate_pronunciation(
     audio_file: UploadFile = File(...)
 ):
     """[사용자 음성 발음 평가 API] 사용자의 오디오 파일(WAV)과 대본을 받아 점수를 매깁니다."""
-    
+
     # 임시 파일로 오디오 저장 (Azure SDK가 물리적인 파일 경로를 요구함)
-    temp_file_path = f"temp_{audio_file.filename}"
+    # 동시 요청 시 파일명이 겹치지 않도록 uuid를 붙임
+    temp_file_path = f"temp_{uuid.uuid4().hex}_{audio_file.filename}"
     try:
         # 업로드된 파일을 로컬 디스크에 임시 복사
         with open(temp_file_path, "wb") as buffer:
