@@ -3,7 +3,11 @@ import requests
 import json
 from dotenv import load_dotenv
 
+from utils.usage_tracker import log_etri_call
+
 load_dotenv()
+
+REQUEST_TIMEOUT_SECONDS = 30
 
 class EtriLanguageAnalyzer:
     def __init__(self):
@@ -11,11 +15,22 @@ class EtriLanguageAnalyzer:
         # ETRI 형태소 분석 API 엔드포인트
         self.endpoint = "http://aiopen.etri.re.kr:8000/WiseNLU"
 
+        # API 키가 없거나 '여기에_' 같은 기본값이면, 호출을 시도하지 않고 곧장 안전 모드로 반환
+        # (플레이스홀더 값을 Authorization 헤더에 그대로 실으면 latin-1 인코딩 에러로 죽는다)
+        self.use_fallback = not self.api_key or "여기에_" in self.api_key
+
+        if self.use_fallback:
+            print("⚠️ [경고] ETRI API 키가 설정되지 않았습니다.")
+            print("⚠️ 발음 주의 단어 추출은 호출자 쪽 안전 모드(Fallback)에 맡깁니다.\n")
+
     def extract_difficult_words(self, text):
         """
         텍스트를 입력받아 ETRI API로 형태소를 분석한 뒤,
         발음 주의가 필요한 단어(명사, 고유명사, 외래어 등) 리스트를 반환합니다.
         """
+        if self.use_fallback:
+            return []
+
         headers = {
             "Content-Type": "application/json; charset=UTF-8",
             "Authorization": self.api_key
@@ -32,9 +47,10 @@ class EtriLanguageAnalyzer:
         print("🚀 ETRI 언어 분석 API에 형태소 분석을 요청합니다...")
         
         try:
-            response = requests.post(self.endpoint, headers=headers, json=payload)
+            response = requests.post(self.endpoint, headers=headers, json=payload, timeout=REQUEST_TIMEOUT_SECONDS)
             response.raise_for_status()
-            
+            log_etri_call()
+
             result = response.json()
             
             extracted_words = set()

@@ -1,22 +1,23 @@
 import os
+import re
 import requests
-import csv
-from io import StringIO
 from dotenv import load_dotenv
 
+from utils.usage_tracker import log_hcx_call
+
 load_dotenv()
+
+REQUEST_TIMEOUT_SECONDS = 30
 
 class FullScriptGenerator:
     def __init__(self):
         self.api_key = os.getenv("HCX_API_KEY")
-        self.apigw_key = os.getenv("HCX_APIGW_KEY")
-        self.model_name = "HCX-005" 
-        self.endpoint = f"https://clovastudio.apigw.ntruss.com/testapp/v1/chat-completions/{self.model_name}"
+        self.model_name = os.getenv("HCX_MODEL_NAME", "HCX-005")
+        self.endpoint = f"https://clovastudio.stream.ntruss.com/v3/chat-completions/{self.model_name}"
 
     def generate_full_script(self, ppt_text, presentation_time, style):
         headers = {
-            "X-NCP-CLOVASTUDIO-API-KEY": self.api_key,
-            "X-NCP-APIGW-API-KEY": self.apigw_key,
+            "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
             "Accept": "application/json"
         }
@@ -48,25 +49,33 @@ class FullScriptGenerator:
 
         payload = {
             "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
+                {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
+                {"role": "user", "content": [{"type": "text", "text": user_prompt}]}
             ],
             "topP": 0.8,
             "topK": 0,
             "maxTokens": 2000, # TOON 포맷으로 인해 필요 토큰 수가 대폭 줄어듭니다.
-            "temperature": 0.5, 
+            "temperature": 0.5,
             "repeatPenalty": 5.0
         }
 
         print("🚀 HyperCLOVA X에 대본 생성을 요청합니다 (TOON 포맷)...")
         
         try:
-            response = requests.post(self.endpoint, headers=headers, json=payload)
+            response = requests.post(self.endpoint, headers=headers, json=payload, timeout=REQUEST_TIMEOUT_SECONDS)
             response.raise_for_status() 
             
             result = response.json()
             toon_text = result['result']['message']['content']
-            
+
+            usage = result.get('result', {}).get('usage', {})
+            log_hcx_call(
+                "full",
+                usage.get('promptTokens', 0),
+                usage.get('completionTokens', 0),
+                usage.get('totalTokens', 0),
+            )
+
             # TOON 포맷을 파이썬 딕셔너리로 파싱 (선택적 사용)
             parsed_data = self._parse_toon_format(toon_text)
             return parsed_data
@@ -76,25 +85,27 @@ class FullScriptGenerator:
             return None
 
     def _parse_toon_format(self, toon_text):
-        """TOON 텍스트를 읽어 JSON(Dict) 형태로 복원하는 헬퍼 함수"""
+        """
+        TOON 텍스트에서 (slide_number, script) 쌍을 추출합니다.
+        모델이 매번 프롬프트의 헤더+행 구조를 정확히 지키지 않고
+        `slides[N]{...}`를 슬라이드마다 반복하는 등 변형된 형태로 응답하는 경우가 있어,
+        엄격한 헤더 파싱 대신 "숫자,텍스트" 패턴 자체를 관대하게 찾아내는 방식으로 복구한다.
+        """
         try:
-            lines = toon_text.strip().split('\n')
-            if not lines:
-                return []
-            
-            # 헤더 파싱 (예: slides[3]{slide_number,script}:)
-            header = lines[0]
-            keys_str = header.split('{')[1].split('}')[0]
-            keys = [k.strip() for k in keys_str.split(',')]
-            
-            # 데이터 파싱
-            data_list = []
-            f = StringIO("\n".join(lines[1:]))
-            reader = csv.reader(f, skipinitialspace=True)
-            for row in reader:
-                if len(row) == len(keys):
-                    data_list.append(dict(zip(keys, row)))
-            
+            # slides[N]{ 같은 래퍼/헤더 조각과 닫는 중괄호를 제거해 "숫자,텍스트" 패턴만 남긴다.
+            cleaned = re.sub(r"slides\[\d+\]\{", "", toon_text)
+            cleaned = cleaned.replace("}", "\n")
+
+            pattern = re.compile(r"(\d+)\s*,\s*(.+?)(?=\n\s*\d+\s*,|\Z)", re.DOTALL)
+            data_list = [
+                {"slide_number": num.strip(), "script": re.sub(r"\s+", " ", script).strip()}
+                for num, script in pattern.findall(cleaned)
+                if script.strip()
+            ]
+
+            if not data_list:
+                return {"raw_toon": toon_text}
+
             return {"slides": data_list}
         except Exception as e:
             print(f"⚠️ TOON 포맷 파싱 에러: {e}")

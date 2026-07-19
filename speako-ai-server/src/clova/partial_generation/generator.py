@@ -4,19 +4,21 @@ import csv
 from io import StringIO
 from dotenv import load_dotenv
 
+from utils.usage_tracker import log_hcx_call
+
 load_dotenv()
+
+REQUEST_TIMEOUT_SECONDS = 30
 
 class PartialScriptGenerator:
     def __init__(self):
         self.api_key = os.getenv("HCX_API_KEY")
-        self.apigw_key = os.getenv("HCX_APIGW_KEY")
-        self.model_name = "HCX-005" 
-        self.endpoint = f"https://clovastudio.apigw.ntruss.com/testapp/v1/chat-completions/{self.model_name}"
+        self.model_name = os.getenv("HCX_MODEL_NAME", "HCX-005")
+        self.endpoint = f"https://clovastudio.stream.ntruss.com/v3/chat-completions/{self.model_name}"
 
     def generate_partial_script(self, original_script, target_slide, feedback):
         headers = {
-            "X-NCP-CLOVASTUDIO-API-KEY": self.api_key,
-            "X-NCP-APIGW-API-KEY": self.apigw_key,
+            "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
             "Accept": "application/json"
         }
@@ -48,8 +50,8 @@ class PartialScriptGenerator:
 
         payload = {
             "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
+                {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
+                {"role": "user", "content": [{"type": "text", "text": user_prompt}]}
             ],
             "topP": 0.8,
             "topK": 0,
@@ -59,8 +61,18 @@ class PartialScriptGenerator:
         }
 
         try:
-            response = requests.post(self.endpoint, headers=headers, json=payload)
-            response.raise_for_status() 
-            return response.json()['result']['message']['content']
+            response = requests.post(self.endpoint, headers=headers, json=payload, timeout=REQUEST_TIMEOUT_SECONDS)
+            response.raise_for_status()
+
+            result = response.json()
+            usage = result.get('result', {}).get('usage', {})
+            log_hcx_call(
+                "partial",
+                usage.get('promptTokens', 0),
+                usage.get('completionTokens', 0),
+                usage.get('totalTokens', 0),
+            )
+
+            return result['result']['message']['content']
         except Exception as e:
             return None
