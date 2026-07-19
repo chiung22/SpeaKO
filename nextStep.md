@@ -2,6 +2,15 @@
 
 API 키(ETRI/Azure/Clova Voice) 발급 대기 중 진행 가능한 작업들을 정리합니다. "정리하자"라고 말하면 이 시점까지 작업을 PR/머지하고 이 파일을 최신 상태로 정리합니다.
 
+## ✅ 머지 완료 (2026-07-19)
+
+이 문서에 기록된 작업 전부 [PR #5](https://github.com/chiung22/SpeaKO/pull/5) `fix/hcx-v3-and-pipeline-hardening` 브랜치로 커밋 → 푸시 → 머지 완료. `main`에 반영됨. pytest 9건 통과 상태로 머지.
+
+다음에 이어서 할 만한 것 (아래 "보류" 섹션 참고):
+- ETRI API 키 발급 대기 중 (문의 메일 발송함, 응답 대기)
+- 사용량 단가(KRW/USD) 확인되면 `usage_tracker.py`에 채워서 실제 비용 계산
+- 대본 화자 시점/이미지 텍스트 추출/Azure 다중 pause 정렬 — `tech-debt-tracker.md` 참고
+
 ## 배경
 
 - ETRI epretx.etri.re.kr 가입 페이지 500 에러 → ETRI 측에 문의 메일 발송 완료, 응답 대기 중
