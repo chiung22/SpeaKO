@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
 import os
-import shutil
+import json
 import uuid
 
 # 1. 분리해둔 AI 클라이언트 모듈들 임포트
@@ -21,6 +21,7 @@ from etri.etri_client import EtriLanguageAnalyzer
 from g2p.g2p_client import G2pConverter
 from azure_speech.azure_client import PronunciationEvaluator
 from utils.ppt_extractor import PptExtractor
+from utils.script_storage import save_generated_script
 
 # 2. FastAPI 앱 인스턴스 생성
 app = FastAPI(
@@ -41,6 +42,37 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 업로드 파일 제한 (DoS 방지)
+MAX_PPT_SIZE_BYTES = 20 * 1024 * 1024   # 20MB
+MAX_AUDIO_SIZE_BYTES = 10 * 1024 * 1024  # 10MB
+ALLOWED_PPT_EXTENSIONS = {".pptx"}
+ALLOWED_AUDIO_EXTENSIONS = {".wav"}
+UPLOAD_CHUNK_SIZE = 1024 * 1024  # 1MB
+
+
+def _save_upload_with_limit(upload_file: UploadFile, dest_path: str, max_bytes: int, allowed_extensions: set):
+    """확장자를 검사하고, 크기 제한을 지키며 업로드 파일을 디스크에 저장합니다."""
+    ext = os.path.splitext(upload_file.filename or "")[1].lower()
+    if ext not in allowed_extensions:
+        raise HTTPException(
+            status_code=415,
+            detail=f"허용되지 않는 파일 형식입니다. ({', '.join(sorted(allowed_extensions))}만 허용)"
+        )
+
+    total_bytes = 0
+    with open(dest_path, "wb") as buffer:
+        while True:
+            chunk = upload_file.file.read(UPLOAD_CHUNK_SIZE)
+            if not chunk:
+                break
+            total_bytes += len(chunk)
+            if total_bytes > max_bytes:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"파일 크기가 너무 큽니다. (최대 {max_bytes // (1024 * 1024)}MB)"
+                )
+            buffer.write(chunk)
 
 # 4. 각 AI 모듈 객체 생성
 full_generator = FullScriptGenerator()
@@ -85,8 +117,7 @@ async def extract_ppt(file: UploadFile = File(...)):
     """[PPT 구조화 추출 API] 업로드된 PPTX 파일에서 슬라이드별 텍스트와 주제/키워드를 추출합니다."""
     temp_file_path = f"temp_{uuid.uuid4().hex}_{file.filename}"
     try:
-        with open(temp_file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+        _save_upload_with_limit(file, temp_file_path, MAX_PPT_SIZE_BYTES, ALLOWED_PPT_EXTENSIONS)
 
         result = ppt_extractor.extract_structured_data(temp_file_path)
 
@@ -106,6 +137,15 @@ async def create_full_script(request: FullScriptRequest):
     if not result:
         raise HTTPException(status_code=502, detail="대본 생성에 실패했습니다.")
 
+    saved_path = save_generated_script("full", json.dumps(result, ensure_ascii=False, indent=2), stem="full_script", extension="json")
+    print(f"💾 생성된 전체 대본 저장: {saved_path}")
+
+    # "Slide N: 내용" 평문도 같이 저장 — 부분 재생성 시 원본 텍스트에서 슬라이드 위치를
+    # 별도 매핑 없이 바로 찾을 수 있게 하기 위함.
+    if result.get("slides"):
+        plain_text = "\n".join(f"Slide {slide['slide_number']}: {slide['script']}" for slide in result["slides"])
+        save_generated_script("full", plain_text, stem="full_script_plain", extension="txt")
+
     return {"success": True, "data": result}
 
 @app.post("/api/script/partial")
@@ -115,6 +155,9 @@ async def create_partial_script(request: PartialScriptRequest):
 
     if not result:
         raise HTTPException(status_code=502, detail="대본 부분 재생성에 실패했습니다.")
+
+    saved_path = save_generated_script("partial", result, stem=f"slide{request.target_slide}_script", extension="txt")
+    print(f"💾 재생성된 부분 대본 저장: {saved_path}")
 
     return {"success": True, "data": result}
 
@@ -145,16 +188,21 @@ async def evaluate_pronunciation(
     # 동시 요청 시 파일명이 겹치지 않도록 uuid를 붙임
     temp_file_path = f"temp_{uuid.uuid4().hex}_{audio_file.filename}"
     try:
-        # 업로드된 파일을 로컬 디스크에 임시 복사
-        with open(temp_file_path, "wb") as buffer:
-            shutil.copyfileobj(audio_file.file, buffer)
-        
+        # 업로드된 파일을 로컬 디스크에 임시 복사 (크기/타입 제한 적용)
+        _save_upload_with_limit(audio_file, temp_file_path, MAX_AUDIO_SIZE_BYTES, ALLOWED_AUDIO_EXTENSIONS)
+
         # Azure 평가 모듈 호출
         result = azure_evaluator.evaluate_audio(temp_file_path, reference_text)
-        
+
+        # 다른 엔드포인트(/api/script/*)와 동일하게, 실패는 200이 아닌 502로 알린다.
+        if result.get("status") != "success":
+            raise HTTPException(status_code=502, detail=result.get("message", "발음 평가에 실패했습니다."))
+
         return result
+    except HTTPException:
+        raise
     except Exception as e:
-        return {"status": "error", "message": f"서버 내부 오류: {str(e)}"}
+        raise HTTPException(status_code=502, detail=f"서버 내부 오류: {str(e)}")
     finally:
         # 평가가 완료되었거나 에러가 났더라도, 서버 용량 낭비를 막기 위해 임시 파일 삭제
         if os.path.exists(temp_file_path):

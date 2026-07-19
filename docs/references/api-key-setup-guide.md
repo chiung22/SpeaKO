@@ -2,16 +2,17 @@
 
 `speako-ai-server/.env.example`에 정의된 5개 키를 어디서, 어떻게 발급받는지 정리합니다. 실제 발급 절차는 각 서비스 정책에 따라 바뀔 수 있으니, 화면 구성이 다르면 해당 서비스의 최신 공식 문서를 우선하세요.
 
-## 1. HCX_API_KEY / HCX_APIGW_KEY — Naver CLOVA Studio (HyperCLOVA X)
+## 1. HCX_API_KEY — Naver CLOVA Studio (HyperCLOVA X)
 
 대본 생성(`clova/full_generation`, `clova/partial_generation`)에 사용됩니다.
 
 1. [Naver Cloud Platform](https://www.ncloud.com)에 가입하고 콘솔에 로그인합니다. (개인/사업자 인증 필요할 수 있음)
 2. 콘솔에서 **CLOVA Studio**로 이동합니다 (AI·Application Service 카테고리, 또는 [clovastudio.ncloud.com](https://clovastudio.ncloud.com) 직접 접속).
-3. CLOVA Studio 내 **Playground/테스트 앱(Test App)**을 하나 생성합니다. 서비스용으로 쓸 거라면 이후 **Service App**으로 전환/신청이 필요할 수 있습니다.
-4. 앱을 만들면 **API Key**(`X-NCP-CLOVASTUDIO-API-KEY`에 해당 → `.env`의 `HCX_API_KEY`)가 발급됩니다.
-5. NCP 콘솔의 **API Gateway** 메뉴에서 별도로 **API Gateway 인증키**(`X-NCP-APIGW-API-KEY` → `.env`의 `HCX_APIGW_KEY`)를 발급받아야 합니다. (마이페이지 > 인증키 관리에서도 확인 가능)
-6. 코드의 `model_name = "HCX-005"`가 실제로 콘솔에서 사용 가능한 모델명과 일치하는지 확인하세요. 모델명이 바뀌었다면 `full_generation/generator.py`, `partial_generation/generator.py` 둘 다 수정해야 합니다.
+3. CLOVA Studio 내 **API 키** 메뉴에서 테스트 API 키(또는 서비스 앱 등록 후 서비스 API 키)를 발급합니다.
+4. 발급된 키를 `.env`의 `HCX_API_KEY`에 넣습니다. 호출 시 `Authorization: Bearer {API_KEY}` 헤더 하나로 인증합니다.
+5. 코드의 `model_name = "HCX-005"`가 실제로 콘솔에서 사용 가능한 모델명과 일치하는지 확인하세요. 모델명이 바뀌었다면 `full_generation/generator.py`, `partial_generation/generator.py` 둘 다 수정해야 합니다.
+
+> `X-NCP-APIGW-API-KEY`(API Gateway 인증키, 구 `HCX_APIGW_KEY`)는 2025년 1월 이전에 만든 앱에만 해당하는 구버전 인증 방식입니다. 새로 발급받는 키는 API Gateway 키가 따로 없고, 위의 단일 API 키 + Bearer 헤더만으로 인증됩니다.
 
 > 무료 크레딧이 제공되긴 하지만, 사용량에 따라 과금될 수 있습니다. 콘솔에서 결제 수단 등록이 필요할 수 있습니다.
 

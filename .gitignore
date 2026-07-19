@@ -19,6 +19,15 @@ __pycache__/
 *.wav
 .pytest_cache/
 
+# 테스트용 PPT/녹음 원본 및 생성된 대본 (개인 데이터 / 런타임 산출물, 커밋 대상 아님)
+# projects/<프로젝트명>/ 밑에 pptx + scripts + recordings가 함께 묶여 저장됨
+speako-ai-server/projects/
+speako-ai-server/generated_scripts/
+
+# API 사용량/비용 누적 로그 (개인 사용 데이터, 커밋 대상 아님)
+speako-ai-server/usage_log.md
+speako-ai-server/.usage_state.json
+
 # OS files
 .DS_Store
 Thumbs.db

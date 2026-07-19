@@ -2,8 +2,12 @@ import os
 import requests
 from dotenv import load_dotenv
 
+from utils.usage_tracker import log_clova_voice_call
+
 # .env 파일 로드
 load_dotenv()
+
+REQUEST_TIMEOUT_SECONDS = 30
 
 class ClovaVoiceClient:
     def __init__(self):
@@ -47,12 +51,13 @@ class ClovaVoiceClient:
         print(f"🚀 Clova Voice에 발음 합성을 요청합니다: '{text}'")
         
         try:
-            response = requests.post(self.endpoint, headers=headers, data=data)
+            response = requests.post(self.endpoint, headers=headers, data=data, timeout=REQUEST_TIMEOUT_SECONDS)
             
             if response.status_code == 200:
                 # 응답으로 온 바이너리 데이터를 mp3 파일로 저장
                 with open(output_filename, 'wb') as f:
                     f.write(response.content)
+                log_clova_voice_call(len(text))
                 print(f"✅ 음성 합성 완료! 파일 저장됨: {output_filename}")
                 return output_filename
             else:
