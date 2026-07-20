@@ -8,7 +8,11 @@ USAGE_LOG_PATH = os.path.join(BASE_DIR, "usage_log.md")
 USAGE_STATE_PATH = os.path.join(BASE_DIR, ".usage_state.json")
 
 # 정확한 단가(원/달러)를 콘솔에서 확인하면 여기 채워 넣으세요. None이면 로그에 "TBD"로 표시됩니다.
-HCX_PRICE_PER_1K_TOKENS_KRW = None
+# HCX-005 (2026-07-19 사용자가 콘솔에서 직접 확인한 값, VAT 별도)
+HCX_INPUT_PRICE_PER_1M_TOKENS_KRW = 1250
+HCX_OUTPUT_PRICE_PER_1M_TOKENS_KRW = 5000
+KRW_VAT_RATE = 0.10  # 국내 부가세 10% — 콘솔 단가가 "VAT 별도"라 계산 시 더해서 함께 표시
+
 AZURE_SPEECH_PRICE_PER_HOUR_USD = None
 CLOVA_VOICE_PRICE_PER_CHAR_KRW = None
 
@@ -43,17 +47,22 @@ def _cost_or_tbd(value):
     return "TBD (단가 미확인)" if value is None else value
 
 
+def _hcx_cost_str(hcx):
+    cost_excl_vat = (
+        hcx["prompt_tokens"] / 1_000_000 * HCX_INPUT_PRICE_PER_1M_TOKENS_KRW
+        + hcx["completion_tokens"] / 1_000_000 * HCX_OUTPUT_PRICE_PER_1M_TOKENS_KRW
+    )
+    cost_incl_vat = cost_excl_vat * (1 + KRW_VAT_RATE)
+    return f"{cost_excl_vat:,.1f}원 (VAT 별도) / {cost_incl_vat:,.1f}원 (VAT 포함)"
+
+
 def _rewrite_log(state):
     hcx = state["hcx"]
     azure = state["azure_speech"]
     voice = state["clova_voice"]
     etri = state["etri"]
 
-    hcx_cost = (
-        _cost_or_tbd(HCX_PRICE_PER_1K_TOKENS_KRW)
-        if HCX_PRICE_PER_1K_TOKENS_KRW is None
-        else round(hcx["total_tokens"] / 1000 * HCX_PRICE_PER_1K_TOKENS_KRW)
-    )
+    hcx_cost = _hcx_cost_str(hcx)
     azure_cost = (
         _cost_or_tbd(AZURE_SPEECH_PRICE_PER_HOUR_USD)
         if AZURE_SPEECH_PRICE_PER_HOUR_USD is None
@@ -68,8 +77,8 @@ def _rewrite_log(state):
     lines = [
         "# API 사용량 로그",
         "",
-        "각 외부 API를 호출할 때마다 자동으로 기록됩니다. 정확한 단가를 `src/utils/usage_tracker.py`에 채우기 전까지는",
-        "비용 대신 실제 호출 단위(토큰/초/글자)만 표시됩니다.",
+        "각 외부 API를 호출할 때마다 자동으로 기록됩니다. HCX는 실제 단가가 적용되어 비용이 계산되고,",
+        "Azure Speech / Clova Voice는 단가를 `src/utils/usage_tracker.py`에 채우기 전까지 TBD로 표시됩니다.",
         "",
         "## 누적 합계",
         "",
