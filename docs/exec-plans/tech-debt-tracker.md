@@ -9,7 +9,7 @@
 | TTS 엔드포인트 미연결 | 중간 | `ClovaVoiceClient`가 API 라우터에 없음. `run_pipeline_test.py`/`_batch_generate_and_refine.py`에서만 호출됨. [pronunciation-coaching.md](../product-specs/pronunciation-coaching.md) |
 | 구조화 로깅 없음 | 중간 | 전부 `print()`. 요청 추적 ID 없음. 운영 중 디버깅 어려움. [RELIABILITY.md](../../RELIABILITY.md) |
 | CI 파이프라인 없음 | 낮음 | PR마다 `pytest` 자동 실행이 안 됨. |
-| CLOVA OCR 키 미발급으로 이미지 전용 슬라이드 3건 대본화 대기 중 | 중간 | `ppt_extractor.py` + `ocr/clova_ocr_client.py`로 OCR 연동 코드는 완료했지만, `CLOVA_OCR_SECRET_KEY`/`CLOVA_OCR_INVOKE_URL`이 아직 미발급이라 실제로는 fallback(빈 문자열)만 반환 중. `02분반 1조 ㅎㅎㅎㅎ`, `UMC PM-DAY_진순`, `동아해커톤` 3개 프로젝트가 이 상태로 대본 생성을 못하고 있음. 키 발급되면 `_batch_generate_and_refine.py`로 이 3건만 재시도하면 됨. |
+| 이미지 전용 슬라이드 3건, topic/outline 힌트 연동 전이라 정확도 검증 전 | 낮음~중간 | 이미지 텍스트 추출을 CLOVA OCR(새 키 필요) 대신 HCX-005 비전(기존 `HCX_API_KEY` 재사용)으로 구현 완료 — `clova/vision/image_text_extractor.py`. 정확도를 높이기 위해 사용자가 입력하는 발표 주제/목차를 힌트로 넣어주는 `topic_hint`/`outline_hint` 파라미터까지 준비해뒀지만, Figma 유저플로우의 실제 입력 필드(dev code) 대기 중이라 아직 연결 전. `02분반 1조 ㅎㅎㅎㅎ`, `UMC PM-DAY_진순`, `동아해커톤` 3건이 대상. dev code 안 기다리고 싶으면 사용자가 채팅으로 주제/목차를 알려줘도 바로 테스트 가능. |
 | ETRI_API_KEY 미발급 | 중간 | epretx.etri.re.kr 가입 500 에러로 문의 메일 발송, 응답 대기 중. 대안으로 aiopen.etri.re.kr에서 별도 발급 가능(설정 가이드 참고). 없어도 fallback 단어 리스트로 정상 동작은 함 |
 | CLOVA_VOICE 키 미발급 | 낮음 | TTS가 API 라우터에 아직 연결 안 돼 있어서(위 항목) 지금 당장 급하지 않음 |
 | Azure Speech / Clova Voice / CLOVA OCR 단가 미확인 | 낮음 | HCX는 실제 단가 반영됨(`usage_tracker.py`). 나머지 세 서비스는 콘솔에서 단가 확인 전까지 `Token.md`에 비용이 TBD로만 표시됨 |
@@ -32,4 +32,4 @@
 - HCX 모델명 하드코딩 → `HCX_MODEL_NAME` 환경변수로 뺌 (미설정 시 기존값 `HCX-005` 유지)
 - Azure 발음 평가가 `recognize_once_async()` 때문에 긴 녹음(여러 슬라이드 낭독)에서 처음 pause 이후를 아예 안 듣던 문제 → 연속 인식(`start_continuous_recognition`) + `enable_miscue=True`로 교체해 해결. 이제 사용자가 어디까지 읽었는지 미리 알려주지 않아도, 전체 대본(예: 27슬라이드 전체)을 reference로 줘도 실제 말한 부분만 알아서 채점함. 다만 pause가 여러 번 있을 때의 단어 순서 정렬은 위 표에 남은 잔여 이슈 참고.
 - 생성된 대본의 화자 시점이 부자연스러움(관찰자 시점 "~설명합니다") → `ScriptRefiner`(`full_generation/generator.py`) 추가로 해결. 초안을 2차 HCX 호출로 다시 리뷰시켜 발표자 1인칭 구어체("~설명드리겠습니다")로 다듬음. 실제 3건(ClipRoute, 글챌 ppt, 에시설_02분반_4조_PromeAI)에서 자연스럽게 나온 것 확인.
-- PPT 내 이미지/도형 안의 텍스트는 추출 안 됨 → CLOVA OCR 연동으로 해결(코드 레벨). `ppt_extractor.py`가 텍스트박스 없는 PICTURE 도형을 만나면 `ocr/clova_ocr_client.py`로 이미지를 보내 텍스트를 뽑아옴. 다만 `CLOVA_OCR_SECRET_KEY`/`CLOVA_OCR_INVOKE_URL`이 아직 미발급이라 실사용은 안 됨 — 위 표의 새 항목 참고.
+- PPT 내 이미지/도형 안의 텍스트는 추출 안 됨 → 해결. 처음엔 CLOVA OCR(별도 키 필요)을 검토했지만, 이미 쓰는 `HCX-005`가 비전 모델이라는 걸 확인하고 새 키 없이 HCX로 이미지를 직접 읽게 함(`clova/vision/image_text_extractor.py`). 아이콘/구분선 같은 장식 이미지는 크기(150x100px 미만)·가로세로비(5:1 초과) 기준으로 걸러내고 내용 있을 법한 이미지만 보냄. 정확도 보강용 topic/outline 힌트 연동은 위 표의 잔여 항목 참고.
