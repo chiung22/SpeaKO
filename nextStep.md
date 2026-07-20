@@ -2,6 +2,10 @@
 
 API 키(ETRI/Azure/Clova Voice) 발급 대기 중 진행 가능한 작업들을 정리합니다. "정리하자"라고 말하면 이 시점까지 작업을 PR/머지하고 이 파일을 최신 상태로 정리합니다.
 
+## ✅ 머지 완료 (2026-07-21)
+
+CLOVA OCR → HCX-005 비전 교체 작업 [PR #6](https://github.com/chiung22/SpeaKO/pull/6) `feat/hcx-vision-image-extraction` 브랜치로 머지 완료. pytest 9건 통과 상태로 `main` 반영. (중간 발표 대본은 요청대로 git에 올리지 않고 `docs/presentations/`에 로컬 파일로만 남겨둠.)
+
 ## ⏸️ 대기 중 (2026-07-20): Figma 유저플로우 dev code 받으면 topic/outline 입력 연동
 
 이미지 전용 슬라이드 3건(`02분반 1조 ㅎㅎㅎㅎ`, `UMC PM-DAY_진순`, `동아해커톤`) 처리 방식을 CLOVA OCR 대신 **HCX-005 비전**(새 키 불필요, 이미 있는 `HCX_API_KEY` 재사용)으로 바꾸기로 함. 정확도를 높이려면 사용자가 입력하는 "발표 주제/목차"를 이미지 인식 프롬프트에 문맥으로 같이 넣어주는 게 좋은데, 실제로 Figma 유저플로우 상 사용자가 주제/목차를 입력하는 화면이 있다고 확인함.
