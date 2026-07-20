@@ -4,7 +4,7 @@ from datetime import datetime
 
 # speako-ai-server/
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-USAGE_LOG_PATH = os.path.join(BASE_DIR, "usage_log.md")
+USAGE_LOG_PATH = os.path.join(BASE_DIR, "Token.md")
 USAGE_STATE_PATH = os.path.join(BASE_DIR, ".usage_state.json")
 
 # 정확한 단가(원/달러)를 콘솔에서 확인하면 여기 채워 넣으세요. None이면 로그에 "TBD"로 표시됩니다.

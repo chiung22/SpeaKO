@@ -24,8 +24,8 @@ __pycache__/
 speako-ai-server/projects/
 speako-ai-server/generated_scripts/
 
-# API 사용량/비용 누적 로그 (개인 사용 데이터, 커밋 대상 아님)
-speako-ai-server/usage_log.md
+# API 사용량/비용(토큰) 누적 로그 (개인 사용 데이터, 커밋 대상 아님)
+speako-ai-server/Token.md
 speako-ai-server/.usage_state.json
 
 # OS files
