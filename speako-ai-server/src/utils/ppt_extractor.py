@@ -7,7 +7,7 @@ try:
 except ImportError:
     print("⚠️ python-pptx 라이브러리가 설치되지 않았습니다. 터미널에서 'pip install python-pptx'를 실행해주세요.")
 
-from ocr.clova_ocr_client import ClovaOcrClient
+from clova.vision.image_text_extractor import ImageTextExtractor
 
 # 빈도 기반 키워드 추출 시 제외할 일반 어미/접속사류
 _STOPWORDS = {
@@ -16,20 +16,35 @@ _STOPWORDS = {
     "오늘", "여러분", "우리", "대한", "위한", "통해", "대해", "에서", "그런",
 }
 
+# 아이콘/구분선 같은 장식용 이미지는 OCR 대상에서 제외하기 위한 최소 크기 기준(px)
+_MIN_OCR_IMAGE_WIDTH = 150
+_MIN_OCR_IMAGE_HEIGHT = 100
+# HCX-005 비전 입력 제약(가로세로 비율 1:5~5:1)을 벗어나는 길쭉한 이미지도 제외
+_MAX_OCR_ASPECT_RATIO = 5.0
+
 class PptExtractor:
     def __init__(self):
-        self.ocr_client = ClovaOcrClient()
+        self.image_text_extractor = ImageTextExtractor()
 
-    def extract_structured_data(self, file_path: str) -> dict:
+    def extract_structured_data(self, file_path: str, topic_hint: str = "", outline_hint: str = "") -> dict:
         """
         [업데이트] PPTX 파일 경로를 입력받아 아래와 같이 구조화된 딕셔너리를 반환합니다.
         1. 발표 주제 및 목차/키워드 자동 추출
         2. 슬라이드 번호별 텍스트 완벽 분리
-        3. 텍스트박스가 아니라 이미지(캡처/스캔)로만 된 슬라이드는 CLOVA OCR로 텍스트 추출 시도
+        3. 텍스트박스가 아니라 이미지(캡처/스캔)로만 된 슬라이드는 HCX-005 비전으로 텍스트 추출 시도
+
+        topic_hint / outline_hint: 사용자가 직접 입력한 발표 주제/목차(Figma 유저 플로우 상의 입력값).
+        주어지면 이미지 텍스트 인식 시 문맥으로 함께 제공해 정확도를 높인다. 없으면 힌트 없이 읽는다.
         """
         if not os.path.exists(file_path):
             print(f"❌ 파일을 찾을 수 없습니다: {file_path}")
             return {"metadata": {"topic": "", "keywords": []}, "slides": []}
+
+        context_hint = ""
+        if topic_hint:
+            context_hint += f"발표 주제: {topic_hint}\n"
+        if outline_hint:
+            context_hint += f"목차/가이드라인: {outline_hint}\n"
 
         try:
             prs = Presentation(file_path)
@@ -45,8 +60,17 @@ class PptExtractor:
                     if hasattr(shape, "text") and shape.text.strip():
                         slide_texts.append(shape.text.strip())
                     elif shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
-                        # 텍스트박스 없이 이미지로만 들어간 슬라이드 대응 (예: 캡처/스캔해서 넣은 장표)
-                        ocr_text = self.ocr_client.extract_text_from_image(shape.image.blob, shape.image.ext)
+                        # 텍스트박스 없이 이미지로만 들어간 슬라이드 대응 (예: 캡처/스캔해서 넣은 장표).
+                        # 아이콘/구분선 같은 장식용 이미지는 크기/비율로 걸러내고, 내용이 있을 법한
+                        # 이미지만 비전 모델에 보낸다.
+                        width_px, height_px = shape.image.size
+                        if width_px < _MIN_OCR_IMAGE_WIDTH or height_px < _MIN_OCR_IMAGE_HEIGHT:
+                            continue
+                        aspect_ratio = max(width_px, height_px) / max(1, min(width_px, height_px))
+                        if aspect_ratio > _MAX_OCR_ASPECT_RATIO:
+                            continue
+
+                        ocr_text = self.image_text_extractor.extract_text_from_image(shape.image.blob, context_hint)
                         if ocr_text.strip():
                             slide_texts.append(ocr_text.strip())
 

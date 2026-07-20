@@ -1,20 +1,22 @@
 # Next Step — 진행 현황
 
-API 키(ETRI/Azure/Clova Voice/CLOVA OCR) 발급 대기 중 진행 가능한 작업들을 정리합니다. "정리하자"라고 말하면 이 시점까지 작업을 PR/머지하고 이 파일을 최신 상태로 정리합니다.
+API 키(ETRI/Azure/Clova Voice) 발급 대기 중 진행 가능한 작업들을 정리합니다. "정리하자"라고 말하면 이 시점까지 작업을 PR/머지하고 이 파일을 최신 상태로 정리합니다.
 
-## 🔄 진행 중 (2026-07-20): CLOVA OCR 연동 (이미지 전용 슬라이드 3건 대응)
+## ⏸️ 대기 중 (2026-07-20): Figma 유저플로우 dev code 받으면 topic/outline 입력 연동
 
-배치 작업에서 실패했던 3개 프로젝트(`02분반 1조 ㅎㅎㅎㅎ`, `UMC PM-DAY_진순`, `동아해커톤`)는 슬라이드가 전부 이미지(캡처)로만 되어 있어 `python-pptx`로 텍스트를 못 뽑던 문제. OCR 도입 여부를 물어봤고, 사용자가 **CLOVA OCR(네이버)**을 선택함 — 이미 CLOVA Studio/Voice를 쓰는 것과 같은 생태계라서.
+이미지 전용 슬라이드 3건(`02분반 1조 ㅎㅎㅎㅎ`, `UMC PM-DAY_진순`, `동아해커톤`) 처리 방식을 CLOVA OCR 대신 **HCX-005 비전**(새 키 불필요, 이미 있는 `HCX_API_KEY` 재사용)으로 바꾸기로 함. 정확도를 높이려면 사용자가 입력하는 "발표 주제/목차"를 이미지 인식 프롬프트에 문맥으로 같이 넣어주는 게 좋은데, 실제로 Figma 유저플로우 상 사용자가 주제/목차를 입력하는 화면이 있다고 확인함.
 
-**구현 완료 (코드 레벨):**
-- `src/ocr/clova_ocr_client.py` 신규 — CLOVA OCR General API 클라이언트. `X-OCR-SECRET` 헤더 + `CLOVA_OCR_INVOKE_URL`(도메인별 API Gateway 주소)로 인증하는, CLOVA Studio와는 별개의 인증 방식. 이미지를 base64로 인코딩해 전송, `images[0].fields[].inferText`를 이어붙여서 반환.
-- `ppt_extractor.py`: 슬라이드 안 도형이 텍스트박스가 아니라 `PICTURE` 타입이면 OCR로 텍스트 추출 시도하도록 연동.
-- `usage_tracker.py`: CLOVA OCR 호출 수 + 인식된 텍스트 블록 수 추적 추가 (단가는 아직 TBD).
-- `.env`/`.env.example`/`docs/references/api-key-setup-guide.md`: `CLOVA_OCR_SECRET_KEY`, `CLOVA_OCR_INVOKE_URL` 플레이스홀더 및 발급 절차(NCP 콘솔 > CLOVA OCR > 일반 도메인 생성 > API Gateway 연동) 추가.
+**구현된 것**: `ppt_extractor.extract_structured_data(file_path, topic_hint="", outline_hint="")`가 이미 `topic_hint`/`outline_hint`를 받아서 `clova/vision/image_text_extractor.py`(HCX 비전 클라이언트, 신규)로 전달하도록 준비해둠. 작은 아이콘/구분선 이미지는 크기(150x100px 미만)·가로세로비(5:1 초과) 기준으로 걸러내고, 내용 있을 법한 큰 이미지만 비전 모델에 보냄.
 
-**아직 막힌 것:** 키가 없어서 실제로는 fallback(빈 문자열)만 반환 중 — 3개 프로젝트는 여전히 대본 생성이 안 되는 상태. 키 없이도 기존 흐름은 안 깨지는 것 확인함(pytest 9건 통과, 이미지 전용 PPT 넣어도 크래시 없이 0장으로 정상 반환).
+**대기 중인 것**: 디자이너에게 dev code(정확한 필드명/데이터 형태) 요청함 — 이게 와야 실제 프론트-백엔드 계약에 맞게 `/api/ppt/extract` 요청에 topic/outline을 실어 보내는 부분을 마무리할 수 있음. 받으면 이어서 진행.
 
-**다음 할 일**: 사용자가 CLOVA OCR 키/Invoke URL 발급받으면 `.env`에 채우고, `python _batch_generate_and_refine.py "02분반 1조 ㅎㅎㅎㅎ" "UMC PM-DAY_진순" "동아해커톤"`로 이 3건만 재시도.
+**당장 테스트하려면**: 위 3개 프로젝트의 주제/목차를 사용자가 채팅으로 알려주면, 그걸 `topic_hint`/`outline_hint`로 임시로 넣어서 바로 테스트 가능 (dev code 안 기다려도 됨).
+
+## 🔁 폐기됨: CLOVA OCR 연동 → HCX-005 비전으로 대체 (2026-07-20)
+
+처음엔 이미지 전용 슬라이드 3건(`02분반 1조 ㅎㅎㅎㅎ`, `UMC PM-DAY_진순`, `동아해커톤`) 처리를 위해 CLOVA OCR(네이버)을 연동했었음 (`src/ocr/clova_ocr_client.py`, `.env`의 `CLOVA_OCR_SECRET_KEY`/`CLOVA_OCR_INVOKE_URL`, `usage_tracker.py`의 OCR 집계 등). 그런데 CLOVA OCR은 **새 키 발급이 필요**했고, 어차피 대본 생성에 쓰는 `HCX-005`가 비전(이미지 이해) 모델이라는 걸 확인해서 **새 키 없이 기존 `HCX_API_KEY`로 이미지를 직접 읽는 방식**으로 완전히 대체함.
+
+"정리하자" 시점에 `ocr/clova_ocr_client.py` 삭제, `.env`/`.env.example`/설정 가이드/`usage_tracker.py`에서 CLOVA OCR 관련 내용 전부 정리함. 위 섹션이 현재 유효한 접근 방식.
 
 ## ✅ 머지 완료 (2026-07-19)
 
