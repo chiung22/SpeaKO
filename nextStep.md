@@ -1,6 +1,20 @@
 # Next Step — 진행 현황
 
-API 키(ETRI/Azure/Clova Voice) 발급 대기 중 진행 가능한 작업들을 정리합니다. "정리하자"라고 말하면 이 시점까지 작업을 PR/머지하고 이 파일을 최신 상태로 정리합니다.
+API 키(ETRI/Azure/Clova Voice/CLOVA OCR) 발급 대기 중 진행 가능한 작업들을 정리합니다. "정리하자"라고 말하면 이 시점까지 작업을 PR/머지하고 이 파일을 최신 상태로 정리합니다.
+
+## 🔄 진행 중 (2026-07-20): CLOVA OCR 연동 (이미지 전용 슬라이드 3건 대응)
+
+배치 작업에서 실패했던 3개 프로젝트(`02분반 1조 ㅎㅎㅎㅎ`, `UMC PM-DAY_진순`, `동아해커톤`)는 슬라이드가 전부 이미지(캡처)로만 되어 있어 `python-pptx`로 텍스트를 못 뽑던 문제. OCR 도입 여부를 물어봤고, 사용자가 **CLOVA OCR(네이버)**을 선택함 — 이미 CLOVA Studio/Voice를 쓰는 것과 같은 생태계라서.
+
+**구현 완료 (코드 레벨):**
+- `src/ocr/clova_ocr_client.py` 신규 — CLOVA OCR General API 클라이언트. `X-OCR-SECRET` 헤더 + `CLOVA_OCR_INVOKE_URL`(도메인별 API Gateway 주소)로 인증하는, CLOVA Studio와는 별개의 인증 방식. 이미지를 base64로 인코딩해 전송, `images[0].fields[].inferText`를 이어붙여서 반환.
+- `ppt_extractor.py`: 슬라이드 안 도형이 텍스트박스가 아니라 `PICTURE` 타입이면 OCR로 텍스트 추출 시도하도록 연동.
+- `usage_tracker.py`: CLOVA OCR 호출 수 + 인식된 텍스트 블록 수 추적 추가 (단가는 아직 TBD).
+- `.env`/`.env.example`/`docs/references/api-key-setup-guide.md`: `CLOVA_OCR_SECRET_KEY`, `CLOVA_OCR_INVOKE_URL` 플레이스홀더 및 발급 절차(NCP 콘솔 > CLOVA OCR > 일반 도메인 생성 > API Gateway 연동) 추가.
+
+**아직 막힌 것:** 키가 없어서 실제로는 fallback(빈 문자열)만 반환 중 — 3개 프로젝트는 여전히 대본 생성이 안 되는 상태. 키 없이도 기존 흐름은 안 깨지는 것 확인함(pytest 9건 통과, 이미지 전용 PPT 넣어도 크래시 없이 0장으로 정상 반환).
+
+**다음 할 일**: 사용자가 CLOVA OCR 키/Invoke URL 발급받으면 `.env`에 채우고, `python _batch_generate_and_refine.py "02분반 1조 ㅎㅎㅎㅎ" "UMC PM-DAY_진순" "동아해커톤"`로 이 3건만 재시도.
 
 ## ✅ 머지 완료 (2026-07-19)
 

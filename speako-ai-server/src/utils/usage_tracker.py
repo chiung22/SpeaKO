@@ -15,24 +15,30 @@ KRW_VAT_RATE = 0.10  # 국내 부가세 10% — 콘솔 단가가 "VAT 별도"라
 
 AZURE_SPEECH_PRICE_PER_HOUR_USD = None
 CLOVA_VOICE_PRICE_PER_CHAR_KRW = None
+CLOVA_OCR_PRICE_PER_CALL_KRW = None
 
 _DEFAULT_STATE = {
     "hcx": {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
     "etri": {"calls": 0},
     "azure_speech": {"calls": 0, "audio_seconds": 0.0},
     "clova_voice": {"calls": 0, "characters": 0},
+    "clova_ocr": {"calls": 0, "fields_recognized": 0},
     "rows": [],
 }
 
 
 def _load_state():
+    state = json.loads(json.dumps(_DEFAULT_STATE))
     if os.path.exists(USAGE_STATE_PATH):
         try:
             with open(USAGE_STATE_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
+                saved = json.load(f)
+            # 이전 버전 state 파일에 없던 키(예: 새로 추가된 서비스)를 기본값으로 채운다.
+            for key, value in saved.items():
+                state[key] = value
         except (json.JSONDecodeError, OSError):
             pass
-    return json.loads(json.dumps(_DEFAULT_STATE))
+    return state
 
 
 def _append_row(state, service, detail):
@@ -61,6 +67,7 @@ def _rewrite_log(state):
     azure = state["azure_speech"]
     voice = state["clova_voice"]
     etri = state["etri"]
+    ocr = state["clova_ocr"]
 
     hcx_cost = _hcx_cost_str(hcx)
     azure_cost = (
@@ -73,12 +80,17 @@ def _rewrite_log(state):
         if CLOVA_VOICE_PRICE_PER_CHAR_KRW is None
         else round(voice["characters"] * CLOVA_VOICE_PRICE_PER_CHAR_KRW)
     )
+    ocr_cost = (
+        _cost_or_tbd(CLOVA_OCR_PRICE_PER_CALL_KRW)
+        if CLOVA_OCR_PRICE_PER_CALL_KRW is None
+        else round(ocr["calls"] * CLOVA_OCR_PRICE_PER_CALL_KRW)
+    )
 
     lines = [
         "# API 사용량 로그",
         "",
         "각 외부 API를 호출할 때마다 자동으로 기록됩니다. HCX는 실제 단가가 적용되어 비용이 계산되고,",
-        "Azure Speech / Clova Voice는 단가를 `src/utils/usage_tracker.py`에 채우기 전까지 TBD로 표시됩니다.",
+        "Azure Speech / Clova Voice / CLOVA OCR은 단가를 `src/utils/usage_tracker.py`에 채우기 전까지 TBD로 표시됩니다.",
         "",
         "## 누적 합계",
         "",
@@ -87,6 +99,7 @@ def _rewrite_log(state):
         f"| HCX (CLOVA Studio) | {hcx['calls']} | 총 {hcx['total_tokens']:,} tokens (prompt {hcx['prompt_tokens']:,} / completion {hcx['completion_tokens']:,}) | {hcx_cost} |",
         f"| Azure Speech (발음 평가) | {azure['calls']} | 총 오디오 {azure['audio_seconds']:.1f}초 | {azure_cost} |",
         f"| Clova Voice (TTS) | {voice['calls']} | 총 {voice['characters']:,}자 | {voice_cost} |",
+        f"| CLOVA OCR (이미지 텍스트 추출) | {ocr['calls']} | 총 {ocr['fields_recognized']:,}개 텍스트 블록 인식 | {ocr_cost} |",
         f"| ETRI (형태소 분석) | {etri['calls']} | - | 무료 |",
         "",
         "## 호출 기록",
@@ -138,4 +151,12 @@ def log_clova_voice_call(characters: int):
     state["clova_voice"]["calls"] += 1
     state["clova_voice"]["characters"] += characters
     _append_row(state, "Clova Voice", f"TTS 합성 — {characters}자")
+    _save_and_write(state)
+
+
+def log_clova_ocr_call(fields_recognized: int):
+    state = _load_state()
+    state["clova_ocr"]["calls"] += 1
+    state["clova_ocr"]["fields_recognized"] += fields_recognized
+    _append_row(state, "CLOVA OCR", f"이미지 텍스트 추출 — {fields_recognized}개 텍스트 블록 인식")
     _save_and_write(state)

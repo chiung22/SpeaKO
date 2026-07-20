@@ -1,6 +1,6 @@
 # 외부 API 키 발급 가이드
 
-`speako-ai-server/.env.example`에 정의된 5개 키를 어디서, 어떻게 발급받는지 정리합니다. 실제 발급 절차는 각 서비스 정책에 따라 바뀔 수 있으니, 화면 구성이 다르면 해당 서비스의 최신 공식 문서를 우선하세요.
+`speako-ai-server/.env.example`에 정의된 키들을 어디서, 어떻게 발급받는지 정리합니다. 실제 발급 절차는 각 서비스 정책에 따라 바뀔 수 있으니, 화면 구성이 다르면 해당 서비스의 최신 공식 문서를 우선하세요.
 
 ## 1. HCX_API_KEY — Naver CLOVA Studio (HyperCLOVA X)
 
@@ -47,6 +47,18 @@
 2. **AI·Application Service > CLOVA Voice Premium**으로 이동해 서비스 이용 신청을 합니다.
 3. NCP 콘솔의 **API Gateway** 또는 **CLOVA Voice 서비스 신청 앱** 화면에서 **Client ID**, **Client Secret**을 발급받습니다.
 4. HCX와 마찬가지로 NCP 계정 하나로 여러 AI 서비스(CLOVA Studio, CLOVA Voice) 키를 함께 관리하게 됩니다 — 두 서비스를 각각 별도로 "이용 신청"해야 키가 나온다는 점에 유의하세요.
+
+## 5. CLOVA_OCR_SECRET_KEY / CLOVA_OCR_INVOKE_URL — Naver CLOVA OCR (이미지 안 텍스트 추출)
+
+PPT 슬라이드가 텍스트박스가 아니라 이미지(캡처/스캔)로만 되어 있을 때, 그 안의 텍스트를 인식하는 데 사용됩니다 (`utils/ppt_extractor.py`, `ocr/clova_ocr_client.py`). CLOVA Studio와는 인증 방식이 다른 별개 서비스입니다 — 단일 API 키가 아니라 **도메인별 Secret Key + API Gateway Invoke URL** 조합을 씁니다.
+
+1. [Naver Cloud Platform](https://www.ncloud.com) 콘솔에서 **Menu > Services > AI Services > CLOVA OCR**로 이동합니다.
+2. **일반(General) OCR** 도메인을 생성합니다 (템플릿 OCR은 영수증 등 정형 문서용이라 발표 슬라이드에는 일반 OCR이 맞습니다).
+3. 도메인 생성 후 **API Gateway 연동** 버튼을 클릭해 **Secret Key**를 발급받고, 함께 표시되는 **APIGW Invoke URL**을 확인합니다.
+4. Secret Key는 `.env`의 `CLOVA_OCR_SECRET_KEY`에, Invoke URL은 `CLOVA_OCR_INVOKE_URL`에 넣습니다.
+5. 호출 시 헤더 `X-OCR-SECRET: {Secret Key}`와 함께, 이미지를 base64로 인코딩해 Invoke URL로 직접 POST합니다 (`clova_ocr_client.py`가 이미 그렇게 구현되어 있음).
+
+> 이미지 1건당 과금되는 종량제입니다. 정확한 단가는 콘솔에서 확인 후 `usage_tracker.py`의 `CLOVA_OCR_PRICE_PER_CALL_KRW`에 채우면 비용까지 자동 계산됩니다.
 
 ## 키를 다 받은 뒤
 
