@@ -111,6 +111,84 @@ class FullScriptGenerator:
             print(f"⚠️ TOON 포맷 파싱 에러: {e}")
             return {"raw_toon": toon_text}
 
+class ScriptRefiner:
+    """
+    FullScriptGenerator가 만든 초안 대본을 다시 HCX에 넣어
+    발표자 1인칭 구어체로 더 자연스럽게 다듬는 2차 리뷰 단계.
+    입력/출력 모두 "Slide N: 내용" 형식의 평문 대본이다.
+    """
+
+    def __init__(self):
+        self.api_key = os.getenv("HCX_API_KEY")
+        self.model_name = os.getenv("HCX_MODEL_NAME", "HCX-005")
+        self.endpoint = f"https://clovastudio.stream.ntruss.com/v3/chat-completions/{self.model_name}"
+
+    def refine_script(self, script_text, style="신뢰감을 주는 발표자 스타일"):
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+
+        system_prompt = """
+        당신은 발표 대본을 다듬는 전문 감수자입니다.
+        입력으로 주어지는 초안 대본은 "Slide N: 내용" 형식의 줄들로 구성되어 있습니다.
+        이 대본을 발표자가 청중 앞에서 실제로 말하듯 자연스러운 1인칭 구어체로 다듬어주세요.
+
+        [다듬을 때 기준]
+        1. 관찰자 시점("~설명합니다", "~보여줍니다")이 아니라 발표자가 청중에게 직접 말하는 어투("~설명드리겠습니다", "~보여드리겠습니다")로 통일하세요.
+        2. 문장이 어색하거나 번역체스러운 부분, 반복되는 표현은 자연스러운 한국어 구어체로 고치세요.
+        3. 각 슬라이드의 핵심 내용과 정보, 슬라이드 순서는 그대로 유지하세요. 새로운 정보를 추가하거나 빼지 마세요.
+        4. "Slide N:" 라벨과 슬라이드 개수는 절대 바꾸지 마세요. 입력에 있던 슬라이드 번호를 그대로 유지하세요.
+        5. 과도하게 길이를 늘리거나 줄이지 말고, 자연스러움 개선에만 집중하세요.
+
+        출력은 반드시 입력과 동일하게 "Slide N: 내용" 형식의 줄들로만 구성하고, 다른 설명이나 안내 문구는 절대 덧붙이지 마세요.
+        """
+
+        user_prompt = f"""
+        [발표 스타일]
+        {style}
+
+        [초안 대본]
+        {script_text}
+        """
+
+        payload = {
+            "messages": [
+                {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
+                {"role": "user", "content": [{"type": "text", "text": user_prompt}]},
+            ],
+            "topP": 0.8,
+            "topK": 0,
+            "maxTokens": 2000,
+            "temperature": 0.4,
+            "repeatPenalty": 3.0,
+        }
+
+        print("🚀 HyperCLOVA X에 대본 자연스러움 고도화(리뷰)를 요청합니다...")
+
+        try:
+            response = requests.post(self.endpoint, headers=headers, json=payload, timeout=REQUEST_TIMEOUT_SECONDS)
+            response.raise_for_status()
+
+            result = response.json()
+            refined_text = result["result"]["message"]["content"]
+
+            usage = result.get("result", {}).get("usage", {})
+            log_hcx_call(
+                "refine",
+                usage.get("promptTokens", 0),
+                usage.get("completionTokens", 0),
+                usage.get("totalTokens", 0),
+            )
+
+            return refined_text.strip()
+
+        except Exception as e:
+            print(f"❌ 대본 고도화 API 호출 중 에러가 발생했습니다: {e}")
+            return None
+
+
 if __name__ == "__main__":
     ai_client = FullScriptGenerator()
     sample_ppt = "Slide 1: 메타버스 개요. Slide 2: 시장 규모."
