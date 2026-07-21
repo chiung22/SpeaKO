@@ -2,117 +2,23 @@
 
 API 키(ETRI/Azure/Clova Voice) 발급 대기 중 진행 가능한 작업들을 정리합니다. "정리하자"라고 말하면 이 시점까지 작업을 PR/머지하고 이 파일을 최신 상태로 정리합니다.
 
-## ✅ 완료 (2026-07-21): 발음 코칭 카테고리별 하이라이트(장단음/연음/표기-발음불일치) 설계+구현
+## ✅ 머지 완료 (2026-07-21) — PR #7
 
-장단음 데이터 소스(표준국어대사전 API)를 확보한 김에, 남아있던 카테고리별 하이라이트 기능을 설계하고 구현함.
+[PR #7](https://github.com/chiung22/SpeaKO/pull/7) `feat/db-persistence-figma-pronunciation-categories` 브랜치로 머지 완료. pytest 44건 통과 상태로 `main` 반영. 이번 라운드 핵심 내용:
 
-- `utils/hangul_phonology.py`(신규) — 한글 완성형 음절을 초성/중성/종성 인덱스로 분해하는 유틸 + "받침 있는 음절 + 초성 없는(ㅇ) 다음 음절" 구조를 검사하는 `has_liaison_pattern()`(연음 판정).
-- `utils/stdict_client.py`(신규) — `STDICT_API_KEY`로 표준국어대사전 검색(search.do, JSON) → 대표 표제어의 발음(view.do, XML — JSON은 빈 응답이 와서 XML로 요청) 조회 → 장음 기호(`ː`) 포함 여부로 장단음 판정.
-- `DifficultWord`에 `category` 컬럼 추가(로컬 dev DB는 마이그레이션 도구가 없어서 파일 삭제 후 재생성함 — 개인 테스트 데이터라 문제없음).
-- `/api/analysis/words`: 철자≠발음인 단어를 **장단음 → 연음 → 표기-발음불일치** 순으로 분류(우선순위 있음 — 장단음 판정이 먼저), 응답을 `{"words": [...], "summary": {"장단음":N,"연음":M,"표기-발음불일치":K}}` 형태로 변경(기존엔 flat list였음 — breaking change지만 실제 프론트 소비자가 없어서 바로 교체). `GET /api/projects/{id}`의 `difficult_words`에도 `category` 포함.
-- 실제 라이브 호출로 검증: 대본에 "국민"(→"궁민")이 포함된 프로젝트로 `/api/analysis/words` 호출 → `category: "표기-발음불일치"`로 정확히 분류되어 응답/DB 양쪽에 저장되는 것 확인.
-- 테스트: `tests/test_hangul_phonology.py`(신규, 순수 유닛 테스트), `tests/test_stdict_client.py`(신규, HTTP 모킹), `/api/analysis/words` 카테고리 분류 통합 테스트 추가. pytest 35 → **44건**.
+- **영속성 계층(DB)**: SQLite + SQLAlchemy 도입, `projects`/`slides`/`difficult_words`/`pronunciation_evaluations` 테이블. `project_id` 기준으로 전체 API(대본 생성/재생성/단어분석/발음평가)가 이어짐. 히스토리 조회용 `GET /api/projects`, `GET /api/projects/{id}` 추가. 스키마는 [db-schema.md](docs/generated/db-schema.md).
+- **인증**: `X-API-Key` 헤더 검증(`SPEAKO_API_KEY`, fail-open — 미설정 시 로컬 개발용으로 인증 꺼짐, 배포 전 반드시 채워야 함).
+- **CI**: `.github/workflows/tests.yml` 추가. ⚠️ **첫 실행이 GitHub Actions 결제 문제로 실패함**("recent account payments have failed or your spending limit needs to be increased") — 코드/테스트 문제 아님, GitHub Billing 설정에서 결제 정보 확인 필요.
+- **Figma 기반 API 재설계**: 실제 디자인 화면 확보 후 `POST /api/projects`가 PPT/PDF 업로드, PPT 없이 topic+outline만 입력, 완성된 대본 직접 붙여넣기(`script_text`)/파일 업로드(`mode=coaching`, DOCX/TXT/PDF) 세 방식 모두 지원하도록 재설계. 전체 대본 생성도 부분 재생성처럼 `style`(격식체/편안한 말투)+`extra_requirement` 지원.
+- **오디오 MP3/M4A 지원**: ffmpeg 변환 파이프라인 추가(배포 서버에 ffmpeg 설치 필요).
+- **발음 코칭 카테고리별 하이라이트**: 장단음(국립국어원 표준국어대사전 API)/연음(한글 자모 분해)/표기-발음불일치 3분류, `/api/analysis/words` 응답에 집계(`summary`) 포함.
+- **버그 수정 2건**: ETRI 미설정 시 실제 대본과 무관한 고정 단어 반환하던 문제, topic/outline-only 프로젝트 전체 재생성 시 슬라이드 유실되던 문제.
 
-**알려둘 한계** (tech-debt-tracker.md에도 기록):
-- 장단음은 동음이의어 검색 결과 중 첫 번째만 대표로 씀 — 문맥상 의미 중의성은 해소 안 함.
-- 연음은 "받침+무초성" 구조만 보는 휴리스틱이라, 실제로는 구개음화 등 다른 음운 현상(예: "굳이"→"구지")도 구조가 같으면 연음으로 분류될 수 있음.
-
-## ✅ 완료 (2026-07-21): TTS는 키 발급 대기로 보류 기록 + CI 파이프라인 구축
-
-## ✅ 완료 (2026-07-21): 장단음 판정 데이터 소스 확보
-
-사용자가 국립국어원 오픈 API 인증키를 발급받아 옴(표준국어대사전, `stdict.korean.go.kr`). `.env`에 `STDICT_API_KEY`로 저장, `.env.example`에도 플레이스홀더 추가.
-
-실제 호출로 검증: 동음이의어 "눈"의 두 target_code(71074=눈 오는 눈, 409998=보는 눈)를 `https://stdict.korean.go.kr/api/view.do?key=...&q={target_code}&method=target_code`로 조회했더니, `pronunciation` 필드가 각각 `"눈ː"`(장음 표시 있음)와 `"눈"`(없음)으로 정확히 구분됨 — **장단음 판정이 실제로 가능하다는 게 확인됨.** 이전에 "장단음은 데이터 자체가 없어서 근본적으로 막혀있다"고 했던 부분이 풀림.
-
-아직 이 API를 호출해서 실제 단어 목록에 장단음을 매기는 클라이언트 코드는 안 만듦 — 카테고리별 하이라이트(장단음/연음/표기-발음불일치) 기능 전체를 구현할 때 같이 진행 예정. 연음/표기-발음불일치 분류 규칙과 `/api/analysis/words` 응답 포맷 설계는 여전히 남아있음.
-
-## ✅ 완료 (2026-07-21): 보류 항목 중 2개(DOCX 코칭 업로드, MP3/M4A) 추가 처리 + 장단음 API 조사
-
-Figma 기반 작업에서 "설계 필요"로 보류했던 4개 항목 중 사용자가 진행 가능하다고 판단한 것들을 이어서 처리함.
-
-- **DOCX/TXT 코칭 파일 업로드**: `python-docx` 추가, `POST /api/projects`에 `mode="coaching"` 신규 — DOCX(`utils/docx_extractor.py`)/TXT/PDF(`pdf_extractor.extract_full_text`, 신규) 업로드 시 전체 텍스트를 그대로 완성 대본으로 저장(생성 스킵). 실제 docx/txt 파일 만들어서 테스트 통과 확인.
-- **오디오 MP3/M4A 지원**: "서버 관리자가 ffmpeg 설치 가능하다고 함" → `utils/audio_converter.py`(ffmpeg subprocess, 신규) 추가, WAV 아니면 16kHz mono WAV로 변환 후 Azure에 넘김. **로컬에 ffmpeg가 실제로 설치되어 있어서(`ffmpeg -version` 확인) 진짜로 무음 mp3를 만들어 ffmpeg 변환 → 실제 Azure 호출까지 라이브로 검증**(무음이라 502 "음성을 인식할 수 없습니다"가 뜬 것 자체가 변환 성공의 증거 — 변환 실패였다면 다른 에러 메시지가 떴을 것).
-- **장단음 API 조사**: 사용자가 `kli.korean.go.kr/term`(국립국어원 전문용어 API) 링크를 주고 장단음 판정에 쓸 수 있는지 질문 → WebFetch로 확인. 이 API도, 더 적합해 보이는 `stdict.korean.go.kr/openapi`(표준국어대사전)도 `pronunciation`/`pronunciation_info` 필드는 있지만 문서상 장단음 구분이 명시적으로 안 나와 있음 — **API 키 발급받아 실제 응답을 확인해봐야 확실해짐**. `kli.korean.go.kr/term`은 전문용어 사전이라 일반 발표 어휘엔 안 맞을 수 있어, `stdict.korean.go.kr`쪽이 더 적합해 보임. `tech-debt-tracker.md`/`PLANS.md`에 "실제 키 발급 대기" 항목으로 기록.
-- pytest 29 → **35건**, 전체 통과.
-
-**남은 보류 항목**: 카테고리별 하이라이트(장단음 부분은 위 API 키 대기, 연음/표기-발음불일치는 규칙 설계 필요), AI 생성 정성 피드백/팁(새 프롬프트 설계 필요) — 둘 다 설계 결정이 더 필요해서 계속 보류 중.
-
-## ✅ 완료 (2026-07-21): Figma 디자인 확보 + 백엔드 계약을 실제 화면에 맞춤
-
-사용자가 Figma에서 프레임을 전부 Export해서 `docs/figma/`에 넣어줌 — "UMC 10th_SpeaKO" 폴더(랜딩/로그인/회원가입/디자인시스템)와 "UMC 10th_SpeaKO (1)" 폴더(전체 플로우: AI Set Page, AI Script Edit Page, Coach Set/View Page, Feedback Page, Select page 등). 그동안 대기 중이던 "Figma dev code" 문제가 이걸로 해결됨 — 실제 화면을 직접 보고 필드명/플로우를 확인함.
-
-**AI Set Page에서 확인한 것** (그동안 막혀있던 topic/outline 연동의 정답):
-- 발표 주제(필수 아닌 조건부 필수) / 발표 시간 / 목차·가이드라인 / 발표 스타일(격식체·편안한 말투) 4개 입력
-- 빨간 툴팁: "파일 업로드를 하지 않을 시, 발표 주제와 가이드라인을 필수로 입력하셔야 합니다" → **PPT 업로드가 필수가 아니라 선택**이라는 걸 확인. 지금까지 만든 API는 PPT 파일이 무조건 필요했음.
-
-**AI Script Edit Page에서 확인한 것**: 전체 재생성/부분 재생성 토글이 발표 스타일(격식체/편안한 말투) + "재생성 요구사항(자유 입력)"을 공유해서 씀 — 부분 재생성에만 있던 `style`/`extra_requirement`가 전체 생성(재생성)에도 필요하다는 뜻.
-
-**Select page / Coach Set Page에서 확인한 것**: "AI 대본 생성"과 "발표 발음 코칭"이 완전히 분리된 두 입구. 코칭 쪽은 "이미 준비된 대본이 있으신가요?"라며 대본을 직접 붙여넣거나 DOCX/TXT/PDF로 올려서 **생성 단계 없이 바로 코칭/평가로 직행**하는 경로가 따로 있음.
-
-### 구현한 것
-
-- `POST /api/ppt/extract` → **`POST /api/projects`로 교체**, 3가지 입력 방식 지원:
-  1. `file`(PPTX 또는 PDF) — PDF는 `utils/pdf_extractor.py`(신규, pypdf 재사용) 추가해서 지원
-  2. `file` 없이 `topic` + `outline` — 없으면 422 (Figma 툴팁 로직 그대로)
-  3. `script_text` — 이미 완성된 대본을 바로 저장, 생성 단계 스킵하고 코칭/평가로 직행 가능
-- `FullScriptRequest`: `style`을 자유 텍스트 → `Literal["격식체","편안한 말투"]`로, `extra_requirement`(선택) 신규 추가. `FullScriptGenerator.generate_full_script()`에 반영.
-- **실제 라이브 테스트 중 버그 발견/수정**: topic+outline만으로 만든 프로젝트(원본 슬라이드 1개)로 대본을 생성했더니 모델이 4개 슬라이드로 쪼개서 응답했는데, 기존 코드가 "원본에 없는 슬라이드 번호"를 전부 버려서 2~4번째 슬라이드가 통째로 유실되고 있었음. 없는 슬라이드 번호는 새로 만들어서 저장하도록(upsert) 수정, 회귀 테스트 추가.
-- 테스트 24 → **29건**, 전부 실제 라이브 HCX 호출로도 검증(topic+outline만으로 프로젝트 생성 → 4슬라이드 대본 생성 → DB에 4개 다 저장 확인, 실제 PDF 파일로 프로젝트 생성 확인).
-
-### 의도적으로 보류한 것 (Figma에서 발견했지만 스펙 미확정)
-
-Figma의 "Coach View Page"/"Feedback Page"를 보면 이번에 구현한 것보다 훨씬 정교한 화면이 있음:
-- **장단음/연음/표기-발음불일치 3분류 하이라이트** — 지금은 단어+발음기호 flat list만 있고 이런 분류가 없음. 분류 규칙 설계 필요.
-- **AI 생성 "발음 팁"/"상세 피드백"** — Azure는 숫자 점수만 주기 때문에, 이 정성적 피드백 문장은 별도 HCX 호출로 새로 만들어야 함. 프롬프트 설계 필요.
-- **오디오 MP3/M4A 지원** — Figma는 "MP3/WAV/M4A" 명시하는데 지금은 WAV만 됨. ffmpeg 변환 파이프라인이라는 새 의존성이 필요해서 보류.
-- **코칭 대본 DOCX/TXT 파일 업로드** — 텍스트 붙여넣기(`script_text`)는 되지만 파일 업로드는 안 됨. DOCX는 `python-docx` 새 의존성 필요.
-
-이 4가지는 전부 "코드만 있으면 바로 되는" 수준이 아니라 분류 규칙/프롬프트/새 의존성 등 설계 결정이 필요해서, 이번엔 스펙이 명확한 것들(위 "구현한 것")만 먼저 반영하고 `PLANS.md`/`tech-debt-tracker.md`에 남겨둠.
-
-## ✅ 완료 (2026-07-21): TTS는 키 발급 대기로 보류 기록 + CI 파이프라인 구축
-
-"TTS 엔드포인트 연결이 실제 키가 필요하면 기록해두고 다음 단계로 가라"는 요청 →
-`CLOVA_VOICE_CLIENT_ID`/`SECRET` 미발급 상태라 라우터를 연결해도 fallback만 나가 실효성이 없다고 판단, `PLANS.md`에 "보류(실제 키 발급 대기)" 섹션으로 옮기고 다음 키-불필요 우선순위로 넘어감.
-
-`.github/workflows/tests.yml` 신규 — `main` push/PR마다 `speako-ai-server/`에서 `requirements-dev.txt` 설치 후 `pytest tests/ -q` 자동 실행. 외부 API 키 없이도(`.env` 자체가 CI엔 없음) 모든 클라이언트가 이미 fallback 모드로 안전하게 초기화되도록 설계돼 있어서 별도 시크릿 없이 24건 그대로 통과할 것으로 예상 — **실제 GitHub에 push된 후 Actions 탭에서 첫 실행 결과 확인 필요** (로컬에서는 워크플로우 자체를 실행해볼 수 없음).
-
-## ✅ 완료 (2026-07-21): 인증 경계 설정 (X-API-Key)
-
-DB 작업 직후, "SQLite는 서버에 연결하는 게 아니지 않냐, 실제 서버 담당자/프론트 팀이 있는데"라는 질문이 나옴 →
-SQLite는 DB 서버가 아니라 FastAPI 프로세스에 내장된 파일이고, 프론트는 여전히 HTTP로 FastAPI 서버에만 붙는 구조라 지금 당장은 문제 없다고 설명. 다만 서버리스/멀티 인스턴스 배포 시엔 못 씀. 배포 계획을 물어보니 아직 미정이라 **SQLite 유지, 필요해지면 SQLAlchemy 덕분에 `DATABASE_URL`만 바꿔서 Postgres로 쉽게 전환 가능**하다는 걸로 정리하고 다음 우선순위(PLANS.md 1번, 인증)로 진행.
-
-- `main.py`에 `verify_api_key` 의존성 추가 — `X-API-Key` 헤더를 `SPEAKO_API_KEY` 환경변수와 비교. `/api/*` 전부를 별도 `APIRouter(dependencies=[Depends(verify_api_key)])`로 묶어서 일괄 적용, `/`(헬스체크)만 인증 제외.
-- **fail-open 설계**: `SPEAKO_API_KEY`가 비어있거나 플레이스홀더(`여기에_...`)면 인증을 아예 건너뜀 — 로컬 개발 편의. 배포 전에 반드시 실제 값을 채워야 함. 안 채우면 지금처럼 무인증 상태 그대로 나감 — `SECURITY.md`에 명시.
-- 겸사겸사 SECURITY.md에 남아있던 다른 체크리스트 항목도 같이 해결: 업로드 파일명을 그대로 서버 경로에 쓰던 것(`temp_{uuid}_{원본파일명}`) → `_safe_temp_path()`로 확장자만 추출해 새 임의 이름 생성하도록 교체 (경로 조작 방지).
-- 테스트 3건 추가(인증 꺼진 기본 상태 통과, 켜졌을 때 키 없음/틀림 401, 올바른 키면 통과, `/`는 인증 상태와 무관하게 항상 통과) — pytest 21 → **24건**, 전체 통과.
-- 실제 서버로 스모크 테스트 재실행(`_db_smoke_test.py`) — 인증 꺼진 기본 상태에서 기존 플로우 그대로 동작하는 것 재확인.
-
-**한계**: 지금은 공유 비밀키 하나뿐이라 "정당한 호출인지"만 구분하고 "누구인지"는 구분 못함 — 유효한 키만 있으면 아무 `project_id`나 조회/수정 가능. 사용자 계정 시스템이 생겨야 근본 해결됨. `PLANS.md`/`tech-debt-tracker.md`에 후속 작업으로 기록.
-
-## ✅ 완료 (2026-07-21): 영속성 계층(DB) + 프로젝트 개념을 실제 API에 연결
-
-"ETRI/CLOVA Voice 키 없이 지금 가능한 것" 목록 중 사용자가 가장 임팩트 크다고 판단한 두 개(프로젝트 개념 없음 + 영속성 계층 없음)를 먼저 처리.
-
-**핵심 문제**: 로컬 테스트 스크립트(`run_pipeline_test.py` 등)는 `projects/<이름>/` 폴더로 PPT↔대본↔녹음을 묶어서 관리했지만, 실제 `/api/*`는 완전히 stateless라 어떤 대본이 어떤 PPT에서 나왔는지, 지난번 평가 결과가 뭐였는지 전혀 안 남았음.
-
-**구현**:
-- SQLite + SQLAlchemy 도입(`speako-ai-server/src/db/database.py`, `models.py`). DB 파일은 `speako-ai-server/data/speako.db`(gitignore 대상). 서버 기동 시 테이블 자동 생성, 별도 마이그레이션 도구는 아직 없음(스키마 자주 안 바뀔 거라 지금은 과함 — 필요해지면 Alembic 검토).
-- 테이블 4개: `projects`, `slides`(project_id fk), `difficult_words`(project_id fk), `pronunciation_evaluations`(project_id fk, 매 평가마다 새 행 추가 → 히스토리). 상세 스키마와 원안 대비 변경점은 [db-schema.md](docs/generated/db-schema.md).
-- **`/api/ppt/extract`**: 이제 PPT 업로드 시 `projects` + `slides` row를 만들고 `project_id`를 응답에 포함. `project_name`(선택), `topic_hint`/`outline_hint`(선택, HCX 비전 이미지 인식 정확도용)도 폼 필드로 받음.
-- **`/api/script/full`**: `ppt_text` 직접 입력 대신 `project_id`만 받음. DB의 슬라이드 원문으로 대본을 생성하고, 결과를 슬라이드별로 다시 DB에 저장.
-- **`/api/script/partial`**: `original_script` 필드 삭제 — 클라이언트가 원본 대본 전문을 다시 보낼 필요 없이 DB에 저장된 최신 대본을 그대로 씀. `project_id` + `target_slide` + `style`/`extra_requirement`만 받음.
-- **`/api/analysis/words`**: `script_text` 대신 `project_id`. 겸사겸사 **버그도 하나 고침** — ETRI 키 없을 때 실제 대본과 무관하게 고정된 4개 단어(`메타버스`,`인프라`,`특징`,`구축`)만 반환하던 문제를, 이 프로젝트의 실제 대본에서 빈도 기반으로 후보를 뽑는 로컬 휴리스틱(`utils/text_heuristics.py`, `ppt_extractor.py`의 키워드 추출 로직과 공용화)으로 교체.
-- **`/api/evaluation/audio`**: `project_id`(폼 필드) 추가, `reference_text`는 이제 선택 — 안 주면 DB에 저장된 대본 전체로 평가함. 평가 결과를 매번 `pronunciation_evaluations`에 새 행으로 저장(히스토리 누적).
-- **신규 `GET /api/projects`**(목록), **`GET /api/projects/{id}`**(슬라이드별 대본 + 발음 주의 단어 + 평가 히스토리 상세) — db-schema.md가 원래 의도했던 "히스토리 조회" 요구사항을 충족.
-
-**검증**:
-- pytest 9건 → **21건**으로 확장(테스트마다 인메모리 SQLite로 격리, `tests/conftest.py`의 autouse fixture). 새 계약(project_id 기반) 반영 + 404/422 경계 케이스 추가.
-- 실제 서버 코드로 라이브 스모크 테스트(`src/_db_smoke_test.py`, mock 없이 진짜 HCX 호출): PPT 업로드(`부산대_체교과_교수지도안_발표`) → 전체 대본 생성(18/18 슬라이드 DB 저장 확인) → 부분 재생성(원본 재전송 없이 project_id만으로 동작) → 단어 분석(ETRI 키 없어도 실제 대본에서 뽑은 단어 확인, 더 이상 고정 리스트 아님) → `/api/projects` 목록 조회까지 전부 실제로 이어지는 것 확인.
-
-**부수 정리**: `main.py`가 매 요청마다 `generated_scripts/`에 파일도 같이 저장하던 로직 제거(DB가 이제 authoritative source, 파일 중복 저장은 불필요한 복잡도라 판단). 로컬 테스트 스크립트들(`run_pipeline_test.py` 등)은 DB와 무관하게 `projects/` 폴더 기반으로 계속 동작 — 영향 없음.
-
-**남은 것**: 인증/인가가 여전히 없어서, `project_id`를 알면 누구나 남의 프로젝트를 조회/수정할 수 있음. `tech-debt-tracker.md`에 우선순위 올려서 기록함.
+다음에 이어서 할 만한 것 (아래 "보류" 섹션 참고):
+- GitHub Actions 결제 문제 해결 후 CI 정상 동작 확인
+- TTS 엔드포인트 연결 — `CLOVA_VOICE_CLIENT_ID`/`SECRET` 발급 대기
+- AI 생성 정성 피드백/팁(Coach View Page/Feedback Page) — 새 HCX 프롬프트 설계 필요
+- 사용자 계정/소유권 기반 인가 — 프론트엔드 연동 시 필요
 
 ## ✅ 머지 완료 (2026-07-21)
 
