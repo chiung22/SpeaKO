@@ -6,12 +6,14 @@ if sys.stdout.encoding.lower() != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, APIRouter, UploadFile, File, Form, Header, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
+from typing import Literal, Optional
 import uvicorn
 import os
-import json
+import re
 import uuid
 
 # 1. 분리해둔 AI 클라이언트 모듈들 임포트
@@ -21,7 +23,14 @@ from etri.etri_client import EtriLanguageAnalyzer
 from g2p.g2p_client import G2pConverter
 from azure_speech.azure_client import PronunciationEvaluator
 from utils.ppt_extractor import PptExtractor
-from utils.script_storage import save_generated_script
+from utils import pdf_extractor
+from utils import docx_extractor
+from utils import audio_converter
+from utils.text_heuristics import extract_frequent_terms
+from utils.stdict_client import StdictClient
+from utils.hangul_phonology import has_liaison_pattern
+from db.database import get_db, init_db
+from db import models
 
 # 2. FastAPI 앱 인스턴스 생성
 app = FastAPI(
@@ -46,9 +55,31 @@ app.add_middleware(
 # 업로드 파일 제한 (DoS 방지)
 MAX_PPT_SIZE_BYTES = 20 * 1024 * 1024   # 20MB
 MAX_AUDIO_SIZE_BYTES = 10 * 1024 * 1024  # 10MB
-ALLOWED_PPT_EXTENSIONS = {".pptx"}
-ALLOWED_AUDIO_EXTENSIONS = {".wav"}
+ALLOWED_PPT_EXTENSIONS = {".pptx", ".pdf"}
+ALLOWED_COACHING_EXTENSIONS = {".docx", ".txt", ".pdf"}
+ALLOWED_AUDIO_EXTENSIONS = {".wav", ".mp3", ".m4a"}
 UPLOAD_CHUNK_SIZE = 1024 * 1024  # 1MB
+
+# /api/* 호출 인증 (X-API-Key 헤더). 값이 비어있거나 플레이스홀더면 로컬 개발 편의를 위해 인증을 건너뛴다.
+# 배포 전에는 반드시 실제 값으로 채워야 한다 — 안 그러면 누구나 /api/*를 호출해 외부 API 비용을 유발할 수 있다.
+SPEAKO_API_KEY = os.getenv("SPEAKO_API_KEY")
+_AUTH_ENABLED = bool(SPEAKO_API_KEY) and "여기에_" not in SPEAKO_API_KEY
+
+if not _AUTH_ENABLED:
+    print("⚠️ [경고] SPEAKO_API_KEY가 설정되지 않아 /api/* 엔드포인트가 인증 없이 열려 있습니다. (로컬 개발 전용 상태)")
+
+
+def verify_api_key(x_api_key: str = Header(None)):
+    if not _AUTH_ENABLED:
+        return
+    if x_api_key != SPEAKO_API_KEY:
+        raise HTTPException(status_code=401, detail="유효하지 않거나 누락된 API 키입니다. (X-API-Key 헤더 필요)")
+
+
+def _safe_temp_path(original_filename: str) -> str:
+    """원본 파일명을 그대로 경로에 쓰지 않고 확장자만 추출해 새 임의 이름을 만든다 (경로 조작 방지)."""
+    ext = os.path.splitext(original_filename or "")[1].lower()
+    return f"temp_{uuid.uuid4().hex}{ext}"
 
 
 def _save_upload_with_limit(upload_file: UploadFile, dest_path: str, max_bytes: int, allowed_extensions: set):
@@ -81,124 +112,342 @@ etri_analyzer = EtriLanguageAnalyzer()
 g2p_converter = G2pConverter()
 azure_evaluator = PronunciationEvaluator()
 ppt_extractor = PptExtractor()
+stdict_client = StdictClient()
+
+# 5. DB 테이블 생성 (없으면 생성, 있으면 그대로 둠)
+init_db()
+
+
+def _fallback_difficult_words(script_text: str, top_n: int = 6) -> list:
+    """ETRI 키가 없거나 호출이 실패했을 때, 실제 대본 내용에서 빈도 기반으로 발음 주의 단어 후보를 뽑는다."""
+    cleaned = re.sub(r"Slide \d+:", "", script_text)
+    return extract_frequent_terms([cleaned], top_n=top_n, min_length=2)
+
+
+DIFFICULT_WORD_CATEGORIES = ("장단음", "연음", "표기-발음불일치")
+
+
+def _classify_word_category(word: str, is_different: bool):
+    """
+    철자와 발음이 다른 단어를 장단음/연음/표기-발음불일치 3가지로 분류한다.
+    - 장단음: 표준국어대사전에 등록된 발음에 장음 표시(ː)가 있는 경우
+    - 연음: 받침+무초성 음절 구조가 있어 받침이 다음 음절로 넘어가는 경우
+    - 표기-발음불일치: 위 둘에 해당하지 않는 나머지 (비음화/경음화 등)
+    철자와 발음이 같으면(is_different=False) 분류하지 않는다(None).
+    """
+    if not is_different:
+        return None
+    if stdict_client.has_long_vowel(word):
+        return "장단음"
+    if has_liaison_pattern(word):
+        return "연음"
+    return "표기-발음불일치"
+
+
+def _compiled_script_text(project: "models.Project", only_scripted: bool = True) -> str:
+    """프로젝트의 슬라이드들을 "Slide N: 내용" 평문으로 이어붙인다."""
+    slides = [s for s in project.slides if s.script] if only_scripted else project.slides
+    return "\n".join(f"Slide {s.slide_number}: {s.script}" for s in slides)
+
 
 # ==========================================
 # 📦 프론트엔드와 통신할 데이터 모델 (JSON 바디 정의)
 # ==========================================
 class FullScriptRequest(BaseModel):
-    ppt_text: str
+    project_id: int
     presentation_time: int
-    style: str
+    style: Literal["격식체", "편안한 말투"]
+    extra_requirement: Optional[str] = ""
 
 class PartialScriptRequest(BaseModel):
-    original_script: str
+    project_id: int
     target_slide: int
-    feedback: str
+    style: Literal["격식체", "편안한 말투"]
+    extra_requirement: Optional[str] = ""
 
 class AnalysisRequest(BaseModel):
-    script_text: str
-
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "script_text": "메타버스와 인프라 구축의 특징을 살펴봅시다."
-            }
-        }
+    project_id: int
 
 # ==========================================
 # 🚀 API 엔드포인트(라우터) 정의
 # ==========================================
+# "/"는 헬스체크용이라 인증 없이 열어두고, /api/* 전부는 verify_api_key를 거치도록 라우터를 분리한다.
+api = APIRouter(dependencies=[Depends(verify_api_key)])
+
+
 @app.get("/")
 async def root():
     return {"message": "SpeaKO AI 서버가 정상적으로 실행 중입니다!"}
 
-@app.post("/api/ppt/extract")
-async def extract_ppt(file: UploadFile = File(...)):
-    """[PPT 구조화 추출 API] 업로드된 PPTX 파일에서 슬라이드별 텍스트와 주제/키워드를 추출합니다."""
-    temp_file_path = f"temp_{uuid.uuid4().hex}_{file.filename}"
-    try:
-        _save_upload_with_limit(file, temp_file_path, MAX_PPT_SIZE_BYTES, ALLOWED_PPT_EXTENSIONS)
+def _create_project_from_script(db: Session, name: str, script: str):
+    project = models.Project(name=name, filename=None, topic=None, keywords=[])
+    project.slides = [models.Slide(slide_number=1, source_content=script, script=script)]
+    db.add(project)
+    db.commit()
+    db.refresh(project)
+    return project
 
-        result = ppt_extractor.extract_structured_data(temp_file_path)
 
-        if not result["slides"]:
-            raise HTTPException(status_code=422, detail="PPT에서 텍스트를 추출하지 못했습니다.")
+@api.post("/api/projects")
+async def create_project(
+    file: UploadFile = File(None),
+    project_name: str = Form(None),
+    mode: Literal["script", "coaching"] = Form("script"),
+    topic: str = Form(None),
+    outline: str = Form(None),
+    script_text: str = Form(None),
+    db: Session = Depends(get_db),
+):
+    """[프로젝트 생성 API] 입력 방식에 따라 새 프로젝트를 만듭니다.
+    1. file(PPTX/PDF, mode="script" 기본값) — 슬라이드별 텍스트를 추출해서 프로젝트를 만듭니다. topic/outline은
+       이미지 슬라이드 텍스트 인식(HCX 비전) 정확도를 높이는 선택적 힌트로 쓰입니다. ("AI 대본 생성" 플로우)
+    2. file 없이 topic + outline — PPT 없이 주제/가이드라인 텍스트만으로 프로젝트를 만듭니다.
+       이후 /api/script/full 호출 시 이 내용을 바탕으로 대본을 생성합니다.
+    3. script_text 또는 file(DOCX/TXT/PDF, mode="coaching") — 이미 완성된 발표 대본을 그대로 붙여넣거나
+       파일로 올려서, 생성 단계 없이 바로 발음 코칭/평가로 넘어갑니다. ("발표 발음 코칭" 플로우)
+    이후 대본 생성/재생성/단어 분석/발음 평가는 여기서 받은 project_id를 기준으로 이어집니다."""
 
-        return {"success": True, "data": result}
-    finally:
-        if os.path.exists(temp_file_path):
-            os.remove(temp_file_path)
+    if script_text and script_text.strip():
+        project = _create_project_from_script(db, project_name or "직접 입력한 대본", script_text.strip())
+        return {"success": True, "project_id": project.id, "data": {"metadata": {"topic": None, "keywords": []}, "slides": [{"slide_number": 1, "content": script_text.strip()}]}}
 
-@app.post("/api/script/full")
-async def create_full_script(request: FullScriptRequest):
-    """[대본 전체 생성 API]"""
-    result = full_generator.generate_full_script(request.ppt_text, request.presentation_time, request.style)
+    if file is not None and mode == "coaching":
+        temp_file_path = _safe_temp_path(file.filename)
+        try:
+            _save_upload_with_limit(file, temp_file_path, MAX_PPT_SIZE_BYTES, ALLOWED_COACHING_EXTENSIONS)
 
-    if not result:
+            ext = os.path.splitext(file.filename or "")[1].lower()
+            if ext == ".pdf":
+                text = pdf_extractor.extract_full_text(temp_file_path)
+            elif ext == ".docx":
+                text = docx_extractor.extract_full_text(temp_file_path)
+            else:
+                with open(temp_file_path, "rb") as f:
+                    text = f.read().decode("utf-8", errors="ignore")
+            text = text.strip()
+
+            if not text:
+                raise HTTPException(status_code=422, detail="파일에서 텍스트를 추출하지 못했습니다.")
+
+            project = _create_project_from_script(db, project_name or os.path.splitext(file.filename or "project")[0], text)
+            return {"success": True, "project_id": project.id, "data": {"metadata": {"topic": None, "keywords": []}, "slides": [{"slide_number": 1, "content": text}]}}
+        finally:
+            if os.path.exists(temp_file_path):
+                os.remove(temp_file_path)
+
+    if file is not None:
+        temp_file_path = _safe_temp_path(file.filename)
+        try:
+            _save_upload_with_limit(file, temp_file_path, MAX_PPT_SIZE_BYTES, ALLOWED_PPT_EXTENSIONS)
+
+            ext = os.path.splitext(file.filename or "")[1].lower()
+            if ext == ".pdf":
+                result = pdf_extractor.extract_structured_data(temp_file_path)
+            else:
+                result = ppt_extractor.extract_structured_data(temp_file_path, topic_hint=topic or "", outline_hint=outline or "")
+
+            if not result["slides"]:
+                raise HTTPException(status_code=422, detail="파일에서 텍스트를 추출하지 못했습니다.")
+
+            project = models.Project(
+                name=project_name or os.path.splitext(file.filename or "project")[0],
+                filename=file.filename,
+                topic=result["metadata"]["topic"],
+                keywords=result["metadata"]["keywords"],
+            )
+            project.slides = [
+                models.Slide(slide_number=slide["slide_number"], source_content=slide["content"])
+                for slide in result["slides"]
+            ]
+            db.add(project)
+            db.commit()
+            db.refresh(project)
+
+            return {"success": True, "project_id": project.id, "data": result}
+        finally:
+            if os.path.exists(temp_file_path):
+                os.remove(temp_file_path)
+
+    if topic and topic.strip() and outline and outline.strip():
+        brief = f"발표 주제: {topic.strip()}\n목차/가이드라인: {outline.strip()}"
+        project = models.Project(
+            name=project_name or topic.strip()[:50],
+            filename=None,
+            topic=topic.strip(),
+            keywords=[],
+        )
+        project.slides = [models.Slide(slide_number=1, source_content=brief)]
+        db.add(project)
+        db.commit()
+        db.refresh(project)
+        return {"success": True, "project_id": project.id, "data": {"metadata": {"topic": topic.strip(), "keywords": []}, "slides": [{"slide_number": 1, "content": brief}]}}
+
+    raise HTTPException(
+        status_code=422,
+        detail=(
+            "file(PPTX/PDF)을 업로드하거나, topic과 outline을 함께 입력하거나, "
+            "script_text를 입력하거나, mode=coaching과 함께 file(DOCX/TXT/PDF)을 업로드해주세요."
+        ),
+    )
+
+@api.post("/api/script/full")
+async def create_full_script(request: FullScriptRequest, db: Session = Depends(get_db)):
+    """[대본 전체 생성 API] project_id의 슬라이드 원문을 바탕으로 대본을 생성하고, 각 슬라이드에 저장합니다."""
+    project = db.get(models.Project, request.project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다.")
+    if not project.slides:
+        raise HTTPException(status_code=422, detail="이 프로젝트에 추출된 슬라이드가 없습니다.")
+
+    ppt_text = "\n".join(f"Slide {s.slide_number}: {s.source_content}" for s in project.slides)
+    result = full_generator.generate_full_script(ppt_text, request.presentation_time, request.style, request.extra_requirement)
+
+    if not result or not result.get("slides"):
         raise HTTPException(status_code=502, detail="대본 생성에 실패했습니다.")
 
-    saved_path = save_generated_script("full", json.dumps(result, ensure_ascii=False, indent=2), stem="full_script", extension="json")
-    print(f"💾 생성된 전체 대본 저장: {saved_path}")
+    # PPT 기반 프로젝트는 보통 원본 슬라이드 수와 생성된 슬라이드 수가 같지만,
+    # topic/outline만으로 만든 프로젝트(원본 슬라이드 1개)는 모델이 알아서 여러 슬라이드로 쪼개 생성하기도 한다.
+    # 이 경우 기존에 없는 슬라이드 번호는 새로 만들어서(upsert) 생성 결과가 유실되지 않게 한다.
+    slides_by_number = {s.slide_number: s for s in project.slides}
+    for item in result["slides"]:
+        try:
+            slide_number = int(item["slide_number"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        slide = slides_by_number.get(slide_number)
+        if slide:
+            slide.script = item["script"]
+        else:
+            new_slide = models.Slide(project_id=project.id, slide_number=slide_number, script=item["script"])
+            db.add(new_slide)
+            slides_by_number[slide_number] = new_slide
+    db.commit()
 
-    # "Slide N: 내용" 평문도 같이 저장 — 부분 재생성 시 원본 텍스트에서 슬라이드 위치를
-    # 별도 매핑 없이 바로 찾을 수 있게 하기 위함.
-    if result.get("slides"):
-        plain_text = "\n".join(f"Slide {slide['slide_number']}: {slide['script']}" for slide in result["slides"])
-        save_generated_script("full", plain_text, stem="full_script_plain", extension="txt")
+    return {"success": True, "project_id": project.id, "data": result}
 
-    return {"success": True, "data": result}
+@api.post("/api/script/partial")
+async def create_partial_script(request: PartialScriptRequest, db: Session = Depends(get_db)):
+    """[대본 부분 재생성 API] project_id + target_slide로 대상을 지정하고, style은 "격식체"/"편안한 말투" 중 하나,
+    extra_requirement는 선택 입력(공백 가능). 기존 대본 전문을 다시 보낼 필요 없이 DB에 저장된 걸 그대로 쓴다."""
+    project = db.get(models.Project, request.project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다.")
 
-@app.post("/api/script/partial")
-async def create_partial_script(request: PartialScriptRequest):
-    """[대본 부분 재생성 API]"""
-    result = partial_generator.generate_partial_script(request.original_script, request.target_slide, request.feedback)
+    target_slide = next((s for s in project.slides if s.slide_number == request.target_slide), None)
+    if not target_slide:
+        raise HTTPException(status_code=404, detail=f"슬라이드 {request.target_slide}를 찾을 수 없습니다.")
 
-    if not result:
+    original_script = _compiled_script_text(project)
+    if not original_script:
+        raise HTTPException(status_code=422, detail="먼저 /api/script/full로 전체 대본을 생성해주세요.")
+
+    result = partial_generator.generate_partial_script(
+        original_script, request.target_slide, request.style, request.extra_requirement
+    )
+
+    if not result or "script" not in result:
         raise HTTPException(status_code=502, detail="대본 부분 재생성에 실패했습니다.")
 
-    saved_path = save_generated_script("partial", result, stem=f"slide{request.target_slide}_script", extension="txt")
-    print(f"💾 재생성된 부분 대본 저장: {saved_path}")
+    target_slide.script = result["script"]
+    db.commit()
 
-    return {"success": True, "data": result}
+    return {"success": True, "project_id": project.id, "data": result}
 
-@app.post("/api/analysis/words")
-async def extract_and_convert_words(request: AnalysisRequest):
-    """[발음 주의 단어 추출 및 G2P 변환 API]"""
+@api.post("/api/analysis/words")
+async def extract_and_convert_words(request: AnalysisRequest, db: Session = Depends(get_db)):
+    """[발음 주의 단어 추출 및 G2P 변환 API] project_id의 생성된 대본을 분석 대상으로 삼는다."""
+    project = db.get(models.Project, request.project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다.")
+
+    script_text = _compiled_script_text(project)
+    if not script_text:
+        raise HTTPException(status_code=422, detail="먼저 /api/script/full로 전체 대본을 생성해주세요.")
+
     # 1. ETRI API로 단어 추출
-    extracted_words = etri_analyzer.extract_difficult_words(request.script_text)
-    
-    # ETRI API 키가 없거나 오류가 발생했을 때를 대비한 안전 모드(Fallback)
+    extracted_words = etri_analyzer.extract_difficult_words(script_text)
+
+    # ETRI API 키가 없거나 오류가 발생했을 때를 대비한 안전 모드(Fallback).
+    # 실제 대본 내용과 무관한 고정 리스트 대신, 이 프로젝트의 대본에서 직접 후보를 뽑는다.
     if not extracted_words:
-        print("⚠️ ETRI API 호출 실패 또는 결과 없음. 임시 단어 리스트(Fallback)를 사용합니다.")
-        extracted_words = ["메타버스", "인프라", "특징", "구축"]
-        
+        print("⚠️ ETRI API 호출 실패 또는 결과 없음. 로컬 휴리스틱 fallback을 사용합니다.")
+        extracted_words = _fallback_difficult_words(script_text)
+
     # 2. G2P 모듈로 발음 기호 획득
     final_result = g2p_converter.convert_words(extracted_words)
-    
-    return {"success": True, "data": final_result}
 
-@app.post("/api/evaluation/audio")
+    # 3. 장단음/연음/표기-발음불일치 카테고리 분류 (하이라이트용)
+    summary = {category: 0 for category in DIFFICULT_WORD_CATEGORIES}
+    words_payload = []
+    for item in final_result:
+        category = _classify_word_category(item["word"], item.get("is_different", False))
+        if category:
+            summary[category] += 1
+        words_payload.append({**item, "category": category})
+
+    # 4. 이 프로젝트의 기존 단어 목록을 최신 결과로 교체 (현재 대본 기준 스냅샷)
+    db.query(models.DifficultWord).filter(models.DifficultWord.project_id == project.id).delete()
+    for item in words_payload:
+        db.add(models.DifficultWord(project_id=project.id, word=item["word"], phoneme=item["phoneme"], category=item["category"]))
+    db.commit()
+
+    return {"success": True, "project_id": project.id, "data": {"words": words_payload, "summary": summary}}
+
+@api.post("/api/evaluation/audio")
 async def evaluate_pronunciation(
-    reference_text: str = Form(...),
-    audio_file: UploadFile = File(...)
+    project_id: int = Form(...),
+    reference_text: str = Form(None),
+    audio_file: UploadFile = File(...),
+    db: Session = Depends(get_db),
 ):
-    """[사용자 음성 발음 평가 API] 사용자의 오디오 파일(WAV)과 대본을 받아 점수를 매깁니다."""
+    """[사용자 음성 발음 평가 API] 사용자의 오디오 파일(WAV/MP3/M4A)과 project_id를 받아 점수를 매기고,
+    평가 결과를 히스토리로 저장합니다. reference_text를 안 주면 DB에 저장된 대본 전체를 기준으로 평가합니다."""
 
     # 임시 파일로 오디오 저장 (Azure SDK가 물리적인 파일 경로를 요구함)
-    # 동시 요청 시 파일명이 겹치지 않도록 uuid를 붙임
-    temp_file_path = f"temp_{uuid.uuid4().hex}_{audio_file.filename}"
+    temp_file_path = _safe_temp_path(audio_file.filename)
+    wav_file_path = None
     try:
         # 업로드된 파일을 로컬 디스크에 임시 복사 (크기/타입 제한 적용)
         _save_upload_with_limit(audio_file, temp_file_path, MAX_AUDIO_SIZE_BYTES, ALLOWED_AUDIO_EXTENSIONS)
 
+        project = db.get(models.Project, project_id)
+        if not project:
+            raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다.")
+
+        text_to_evaluate = reference_text or _compiled_script_text(project)
+        if not text_to_evaluate:
+            raise HTTPException(status_code=422, detail="reference_text가 없고, 이 프로젝트에 생성된 대본도 없습니다.")
+
+        # Azure Pronunciation Assessment는 16kHz mono PCM WAV를 요구하므로,
+        # WAV가 아니면(MP3/M4A) ffmpeg로 변환한 뒤 그 결과 파일을 평가에 사용한다.
+        audio_path_for_evaluation = temp_file_path
+        if os.path.splitext(audio_file.filename or "")[1].lower() != ".wav":
+            wav_file_path = _safe_temp_path("converted.wav")
+            if not audio_converter.convert_to_wav(temp_file_path, wav_file_path):
+                raise HTTPException(status_code=502, detail="오디오 파일을 변환하지 못했습니다. 파일이 손상되지 않았는지 확인해주세요.")
+            audio_path_for_evaluation = wav_file_path
+
         # Azure 평가 모듈 호출
-        result = azure_evaluator.evaluate_audio(temp_file_path, reference_text)
+        result = azure_evaluator.evaluate_audio(audio_path_for_evaluation, text_to_evaluate)
 
         # 다른 엔드포인트(/api/script/*)와 동일하게, 실패는 200이 아닌 502로 알린다.
         if result.get("status") != "success":
             raise HTTPException(status_code=502, detail=result.get("message", "발음 평가에 실패했습니다."))
 
-        return result
+        scores = result.get("scores", {})
+        evaluation = models.PronunciationEvaluation(
+            project_id=project.id,
+            accuracy_score=scores.get("accuracy"),
+            fluency_score=scores.get("fluency"),
+            completeness_score=scores.get("completeness"),
+            pronunciation_score=scores.get("pronunciation_score"),
+            words_detail=result.get("words_detail"),
+        )
+        db.add(evaluation)
+        db.commit()
+        db.refresh(evaluation)
+
+        return {"success": True, "project_id": project.id, "evaluation_id": evaluation.id, **result}
     except HTTPException:
         raise
     except Exception as e:
@@ -207,6 +456,63 @@ async def evaluate_pronunciation(
         # 평가가 완료되었거나 에러가 났더라도, 서버 용량 낭비를 막기 위해 임시 파일 삭제
         if os.path.exists(temp_file_path):
             os.remove(temp_file_path)
+        if wav_file_path and os.path.exists(wav_file_path):
+            os.remove(wav_file_path)
+
+@api.get("/api/projects")
+async def list_projects(db: Session = Depends(get_db)):
+    """[프로젝트 히스토리 목록 API]"""
+    projects = db.query(models.Project).order_by(models.Project.created_at.desc()).all()
+    return {
+        "success": True,
+        "data": [
+            {
+                "id": p.id,
+                "name": p.name,
+                "topic": p.topic,
+                "slide_count": len(p.slides),
+                "created_at": p.created_at.isoformat(),
+            }
+            for p in projects
+        ],
+    }
+
+@api.get("/api/projects/{project_id}")
+async def get_project(project_id: int, db: Session = Depends(get_db)):
+    """[프로젝트 상세 조회 API] 슬라이드별 대본, 발음 주의 단어, 평가 히스토리를 함께 반환합니다."""
+    project = db.get(models.Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다.")
+
+    return {
+        "success": True,
+        "data": {
+            "id": project.id,
+            "name": project.name,
+            "filename": project.filename,
+            "topic": project.topic,
+            "keywords": project.keywords,
+            "created_at": project.created_at.isoformat(),
+            "slides": [
+                {"slide_number": s.slide_number, "source_content": s.source_content, "script": s.script}
+                for s in project.slides
+            ],
+            "difficult_words": [{"word": w.word, "phoneme": w.phoneme, "category": w.category} for w in project.difficult_words],
+            "evaluations": [
+                {
+                    "id": e.id,
+                    "accuracy_score": e.accuracy_score,
+                    "fluency_score": e.fluency_score,
+                    "completeness_score": e.completeness_score,
+                    "pronunciation_score": e.pronunciation_score,
+                    "created_at": e.created_at.isoformat(),
+                }
+                for e in project.evaluations
+            ],
+        },
+    }
+
+app.include_router(api)
 
 # 6. 서버 실행 코드
 if __name__ == "__main__":

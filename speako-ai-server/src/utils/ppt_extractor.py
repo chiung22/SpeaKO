@@ -1,6 +1,4 @@
 import os
-import re
-from collections import Counter
 try:
     from pptx import Presentation
     from pptx.enum.shapes import MSO_SHAPE_TYPE
@@ -8,13 +6,7 @@ except ImportError:
     print("⚠️ python-pptx 라이브러리가 설치되지 않았습니다. 터미널에서 'pip install python-pptx'를 실행해주세요.")
 
 from clova.vision.image_text_extractor import ImageTextExtractor
-
-# 빈도 기반 키워드 추출 시 제외할 일반 어미/접속사류
-_STOPWORDS = {
-    "그리고", "그러나", "하지만", "그래서", "따라서", "또한", "즉", "먼저", "마지막으로",
-    "합니다", "습니다", "있습니다", "됩니다", "그것", "이것", "저것", "이번",
-    "오늘", "여러분", "우리", "대한", "위한", "통해", "대해", "에서", "그런",
-}
+from utils.text_heuristics import extract_frequent_terms
 
 # 아이콘/구분선 같은 장식용 이미지는 OCR 대상에서 제외하기 위한 최소 크기 기준(px)
 _MIN_OCR_IMAGE_WIDTH = 150
@@ -131,18 +123,7 @@ class PptExtractor:
 
     def _extract_keywords_by_frequency(self, texts: list, topic: str, top_n: int = 5) -> list:
         """목차 슬라이드가 없는 PPT를 위한 대체 키워드 추출: 전체 텍스트에서 자주 등장하는 단어를 뽑는다."""
-        tokens = []
-        for text in texts:
-            for token in re.split(r"[\s,.\-·:;()\[\]/\\|!?\"']+", text):
-                token = token.strip()
-                if len(token) >= 2 and token != topic and token not in _STOPWORDS:
-                    tokens.append(token)
-
-        if not tokens:
-            return []
-
-        counts = Counter(tokens)
-        return [word for word, _ in counts.most_common(top_n)]
+        return extract_frequent_terms(texts, exclude={topic}, top_n=top_n)
 
 # ==========================================
 # 🧪 [테스트 코드]
