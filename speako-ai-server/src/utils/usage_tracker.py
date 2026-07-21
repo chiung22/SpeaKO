@@ -21,6 +21,7 @@ _DEFAULT_STATE = {
     "etri": {"calls": 0},
     "azure_speech": {"calls": 0, "audio_seconds": 0.0},
     "clova_voice": {"calls": 0, "characters": 0},
+    "stdict": {"calls": 0},
     "rows": [],
 }
 
@@ -65,6 +66,7 @@ def _rewrite_log(state):
     azure = state["azure_speech"]
     voice = state["clova_voice"]
     etri = state["etri"]
+    stdict = state["stdict"]
 
     hcx_cost = _hcx_cost_str(hcx)
     azure_cost = (
@@ -93,6 +95,7 @@ def _rewrite_log(state):
         f"| Azure Speech (발음 평가) | {azure['calls']} | 총 오디오 {azure['audio_seconds']:.1f}초 | {azure_cost} |",
         f"| Clova Voice (TTS) | {voice['calls']} | 총 {voice['characters']:,}자 | {voice_cost} |",
         f"| ETRI (형태소 분석) | {etri['calls']} | - | 무료 |",
+        f"| 표준국어대사전 (장단음 조회) | {stdict['calls']} | - | 무료 |",
         "",
         "## 호출 기록",
         "",
@@ -135,6 +138,13 @@ def log_azure_speech_call(audio_seconds: float, status: str):
     state["azure_speech"]["calls"] += 1
     state["azure_speech"]["audio_seconds"] += audio_seconds
     _append_row(state, "Azure Speech", f"발음 평가 — 오디오 {audio_seconds:.1f}초 ({status})")
+    _save_and_write(state)
+
+
+def log_stdict_call():
+    state = _load_state()
+    state["stdict"]["calls"] += 1
+    _append_row(state, "표준국어대사전", "장단음 조회 호출 (무료)")
     _save_and_write(state)
 
 
