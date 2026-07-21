@@ -8,14 +8,13 @@ API 키(ETRI/Azure/Clova Voice) 발급 대기 중 진행 가능한 작업들을 
 
 - **영속성 계층(DB)**: SQLite + SQLAlchemy 도입, `projects`/`slides`/`difficult_words`/`pronunciation_evaluations` 테이블. `project_id` 기준으로 전체 API(대본 생성/재생성/단어분석/발음평가)가 이어짐. 히스토리 조회용 `GET /api/projects`, `GET /api/projects/{id}` 추가. 스키마는 [db-schema.md](docs/generated/db-schema.md).
 - **인증**: `X-API-Key` 헤더 검증(`SPEAKO_API_KEY`, fail-open — 미설정 시 로컬 개발용으로 인증 꺼짐, 배포 전 반드시 채워야 함).
-- **CI**: `.github/workflows/tests.yml` 추가. ⚠️ **첫 실행이 GitHub Actions 결제 문제로 실패함**("recent account payments have failed or your spending limit needs to be increased") — 코드/테스트 문제 아님, GitHub Billing 설정에서 결제 정보 확인 필요.
+- **CI**: `.github/workflows/tests.yml` 추가. 첫 실행이 **GitHub Actions 지출 한도($12) 소진**으로 실패함("recent account payments have failed or your spending limit needs to be increased") — 코드/테스트 문제 아님. 원인 확인 후 **지출 한도를 올리지 않고 그냥 두기로 결정함**(사용자 판단) — 다음 달 무료 사용량(프라이빗 저장소 월 2,000분)이 리셋되면 자동으로 다시 정상 동작함. 그동안은 로컬에서 `pytest tests/ -q`로 계속 확인하면 됨 — 실제 코드/서버 동작에는 영향 없음.
 - **Figma 기반 API 재설계**: 실제 디자인 화면 확보 후 `POST /api/projects`가 PPT/PDF 업로드, PPT 없이 topic+outline만 입력, 완성된 대본 직접 붙여넣기(`script_text`)/파일 업로드(`mode=coaching`, DOCX/TXT/PDF) 세 방식 모두 지원하도록 재설계. 전체 대본 생성도 부분 재생성처럼 `style`(격식체/편안한 말투)+`extra_requirement` 지원.
 - **오디오 MP3/M4A 지원**: ffmpeg 변환 파이프라인 추가(배포 서버에 ffmpeg 설치 필요).
 - **발음 코칭 카테고리별 하이라이트**: 장단음(국립국어원 표준국어대사전 API)/연음(한글 자모 분해)/표기-발음불일치 3분류, `/api/analysis/words` 응답에 집계(`summary`) 포함.
 - **버그 수정 2건**: ETRI 미설정 시 실제 대본과 무관한 고정 단어 반환하던 문제, topic/outline-only 프로젝트 전체 재생성 시 슬라이드 유실되던 문제.
 
 다음에 이어서 할 만한 것 (아래 "보류" 섹션 참고):
-- GitHub Actions 결제 문제 해결 후 CI 정상 동작 확인
 - TTS 엔드포인트 연결 — `CLOVA_VOICE_CLIENT_ID`/`SECRET` 발급 대기
 - AI 생성 정성 피드백/팁(Coach View Page/Feedback Page) — 새 HCX 프롬프트 설계 필요
 - 사용자 계정/소유권 기반 인가 — 프론트엔드 연동 시 필요
