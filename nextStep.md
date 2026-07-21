@@ -8,7 +8,7 @@ API 키(ETRI/Azure/Clova Voice) 발급 대기 중 진행 가능한 작업들을 
 
 - **영속성 계층(DB)**: SQLite + SQLAlchemy 도입, `projects`/`slides`/`difficult_words`/`pronunciation_evaluations` 테이블. `project_id` 기준으로 전체 API(대본 생성/재생성/단어분석/발음평가)가 이어짐. 히스토리 조회용 `GET /api/projects`, `GET /api/projects/{id}` 추가. 스키마는 [db-schema.md](docs/generated/db-schema.md).
 - **인증**: `X-API-Key` 헤더 검증(`SPEAKO_API_KEY`, fail-open — 미설정 시 로컬 개발용으로 인증 꺼짐, 배포 전 반드시 채워야 함).
-- **CI**: `.github/workflows/tests.yml` 추가. 첫 실행이 **GitHub Actions 지출 한도($12) 소진**으로 실패함("recent account payments have failed or your spending limit needs to be increased") — 코드/테스트 문제 아님. 원인 확인 후 **지출 한도를 올리지 않고 그냥 두기로 결정함**(사용자 판단) — 다음 달 무료 사용량(프라이빗 저장소 월 2,000분)이 리셋되면 자동으로 다시 정상 동작함. 그동안은 로컬에서 `pytest tests/ -q`로 계속 확인하면 됨 — 실제 코드/서버 동작에는 영향 없음.
+- **CI**: `.github/workflows/tests.yml` 추가. 첫 4번의 실행이 **GitHub Actions 지출 한도($12) 소진**으로 실패함("recent account payments have failed or your spending limit needs to be increased") — 코드/테스트 문제 아님. 원인은 저장소가 **프라이빗**이라 월 2,000분 무료 제공분이 있고 그걸 넘으면 과금되는 구조였기 때문. **레포를 퍼블릭으로 전환**하면서 해결됨 — 퍼블릭 저장소는 GitHub Actions가 완전 무료(무제한)라 지출 한도 자체가 적용 안 됨. 전환 전에 git 히스토리 전체(실제 키 값, `.env`, `apikey_발급.txt`)를 검사해서 커밋된 시크릿이 없는 걸 확인 후 진행함. 전환 직후 이전에 실패했던 워크플로우 재실행 → **44 passed로 정상 확인**.
 - **Figma 기반 API 재설계**: 실제 디자인 화면 확보 후 `POST /api/projects`가 PPT/PDF 업로드, PPT 없이 topic+outline만 입력, 완성된 대본 직접 붙여넣기(`script_text`)/파일 업로드(`mode=coaching`, DOCX/TXT/PDF) 세 방식 모두 지원하도록 재설계. 전체 대본 생성도 부분 재생성처럼 `style`(격식체/편안한 말투)+`extra_requirement` 지원.
 - **오디오 MP3/M4A 지원**: ffmpeg 변환 파이프라인 추가(배포 서버에 ffmpeg 설치 필요).
 - **발음 코칭 카테고리별 하이라이트**: 장단음(국립국어원 표준국어대사전 API)/연음(한글 자모 분해)/표기-발음불일치 3분류, `/api/analysis/words` 응답에 집계(`summary`) 포함.
