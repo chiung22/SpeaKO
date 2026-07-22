@@ -16,10 +16,10 @@ pptx_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "proj
 pptx_file = next(f for f in os.listdir(pptx_path) if f.endswith(".pptx"))
 full_pptx_path = os.path.join(pptx_path, pptx_file)
 
-print("1) /api/ppt/extract 실제 PPT로 프로젝트 생성")
+print("1) /api/projects 실제 PPT로 프로젝트 생성")
 with open(full_pptx_path, "rb") as f:
     r = client.post(
-        "/api/ppt/extract",
+        "/api/projects",
         files={"file": (pptx_file, f, "application/octet-stream")},
         data={"project_name": "DB 스모크 테스트"},
     )
