@@ -21,6 +21,8 @@ class ImageTextExtractor:
         self.api_key = os.getenv("HCX_API_KEY")
         self.model_name = os.getenv("HCX_MODEL_NAME", "HCX-005")
         self.endpoint = f"https://clovastudio.stream.ntruss.com/v3/chat-completions/{self.model_name}"
+        # 키가 없으면 네트워크 호출 없이 곧장 안전 모드(빈 문자열 반환).
+        self.use_fallback = not self.api_key or "여기에_" in self.api_key
 
     def extract_text_from_image(self, image_bytes: bytes, context_hint: str = "") -> str:
         """
@@ -28,6 +30,8 @@ class ImageTextExtractor:
         context_hint: 발표 주제/목차 등, 모델이 애매한 글자를 문맥에 맞게 더 정확히 읽도록 돕는 힌트.
                       비워두면 힌트 없이 그대로 읽는다.
         """
+        if self.use_fallback:
+            return ""
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",

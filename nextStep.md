@@ -2,6 +2,26 @@
 
 API 키(ETRI/Azure/Clova Voice) 발급 대기 중 진행 가능한 작업들을 정리합니다. "정리하자"라고 말하면 이 시점까지 작업을 PR/머지하고 이 파일을 최신 상태로 정리합니다.
 
+## ✅ 완료 (2026-07-21): Fable5 다각도 재검토 + 발견 문제 수정 + Fable5.md 코칭 문서
+
+사용자가 "프로젝트 전체 재점검, 하위 모델 써서"라고 요청 → 서브에이전트 3명(정확성/버그, 보안/신뢰성, 테스트/아키텍처)을 병렬로 돌려 심층 검토하고, 발견된 문제 중 **정확성 버그 + 값싼 보안 개선**을 실제로 수정했다. 프로덕션 하드닝(이벤트루프 블로킹, 레이트리밋, 업로드 본문 크기 등)은 아직 프론트/배포 전이라 tech-debt-tracker에 문서화만 함.
+
+**핵심으로 고친 것 (대부분 최근 라운드에 새로 넣은 코드의 버그):**
+- 장단음 카테고리가 사실상 죽은 코드였음 — `is_different`와 무관하게 판정하도록 순서 변경. **실제 표준국어대사전 API로 검증: 사건/정보/가구가 이제 장단음으로 잡힘(예전 로직이면 0개, 이제 정상 발동).**
+- `/api/analysis/words` stdict 무제한 fan-out → 캐시 + 상한(40) 추가.
+- HCX 클라이언트 4개에 `use_fallback` 가드 없던 것 → 추가(CI 실네트워크 호출 테스트 2개도 오프라인·결정적으로 바뀜).
+- phantom 슬라이드 `source_content=None`이 `"Slide 2: None"`으로 재전송되던 것 → 방어.
+- stdict `search.do`가 조사 붙은 단어엔 빈 본문을 줘서 `.json()`이 터지던 것 → 빈 본문 가드. XML은 `response.content`로 파싱(인코딩 안전).
+- 손상 PDF/DOCX 업로드 raw 500 → 422. 예외 메시지 응답 노출 제거. 인증 상수시간 비교(hmac). `finally` os.remove 방어. SQLite WAL+timeout. `_db_smoke_test.py` 엔드포인트 픽스. `apikey*` gitignore.
+
+**문서:** `Fable5.md` 신규(하위 모델용 코칭 — 이 프로젝트 실제 버그에서 뽑은 11개 재발방지 규칙). `docs/product-specs/*` 코드와 어긋난 부분 갱신. tech-debt-tracker에 수정/문서화 항목 정리.
+
+**검증:** pytest 44 → **49건**(회귀 테스트 5개 추가: 장단음 reachability, category=None, 손상 docx 422, project-not-found 404 등). 실제 stdict API로 장단음 발동 + 캐시 동작 라이브 확인.
+
+**알아둘 한계(정직하게):** ETRI 키가 없으면 fallback 단어 추출이 조사를 못 떼고 단일 글자를 안 뽑아서, 카테고리(특히 장단음) 커버리지가 크게 떨어짐 — ETRI 키가 있으면 개선됨. 장단음은 동음이의어 첫 결과만 대표로 씀(밤/눈 같은 단어는 단음 쪽이 먼저 잡힘).
+
+> 아직 커밋/푸시 진행 중. (이 라운드는 별도 PR 없이 main 직접 반영 예정 — 사용자 지시 따름)
+
 ## ✅ 머지 완료 (2026-07-21) — PR #7
 
 [PR #7](https://github.com/chiung22/SpeaKO/pull/7) `feat/db-persistence-figma-pronunciation-categories` 브랜치로 머지 완료. pytest 44건 통과 상태로 `main` 반영. 이번 라운드 핵심 내용:

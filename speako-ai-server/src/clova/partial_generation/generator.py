@@ -26,8 +26,14 @@ class PartialScriptGenerator:
         self.api_key = os.getenv("HCX_API_KEY")
         self.model_name = os.getenv("HCX_MODEL_NAME", "HCX-005")
         self.endpoint = f"https://clovastudio.stream.ntruss.com/v3/chat-completions/{self.model_name}"
+        # 키가 없으면 네트워크 호출 없이 곧장 안전 모드(None 반환) — 다른 클라이언트와 동일한 패턴.
+        self.use_fallback = not self.api_key or "여기에_" in self.api_key
+        if self.use_fallback:
+            print("⚠️ [경고] HCX_API_KEY가 설정되지 않았습니다. 부분 재생성은 안전 모드(None 반환)로 동작합니다.")
 
     def generate_partial_script(self, original_script, target_slide, style, extra_requirement=""):
+        if self.use_fallback:
+            return None
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",

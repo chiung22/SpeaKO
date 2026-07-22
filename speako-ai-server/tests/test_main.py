@@ -312,9 +312,9 @@ def test_script_full_requires_existing_project():
 
 def test_script_full_fails_without_api_key(monkeypatch, db_session_factory):
     project_id = _create_project(db_session_factory, [(1, "테스트 슬라이드 내용")])
-    # 로컬 .env에 실제 키가 있어도 이 테스트는 결정적으로 동작해야 하므로,
-    # 키가 없는 상황을 강제로 재현해서 검증한다.
-    monkeypatch.setattr(main.full_generator, "api_key", None)
+    # 키가 없으면 use_fallback=True가 되어 네트워크 호출 없이 None을 반환하고, 서버는 502로 알린다.
+    # (실제 네트워크를 때리지 않으므로 CI/오프라인에서도 결정적으로 동작한다)
+    monkeypatch.setattr(main.full_generator, "use_fallback", True)
     response = client.post(
         "/api/script/full",
         json={"project_id": project_id, "presentation_time": 1, "style": "격식체"},
@@ -334,6 +334,9 @@ def test_script_full_parses_real_world_toon_variant_and_saves_to_slides(monkeypa
         "이상 발표를 마치겠습니다. 감사합니다."
     )
     fake_payload = {"result": {"message": {"content": raw_toon}}}
+    # CI에는 .env가 없어 HCX 키가 미설정이면 use_fallback=True가 되므로, 모킹된 네트워크 경로를
+    # 타도록 강제로 False로 둔다. (이 테스트는 파싱 로직 검증이지 키 유무 검증이 아니다)
+    monkeypatch.setattr(main.full_generator, "use_fallback", False)
     monkeypatch.setattr(full_gen_module.requests, "post", lambda *a, **k: _FakeResponse(fake_payload))
 
     response = client.post(
@@ -367,6 +370,7 @@ def test_script_full_creates_new_slides_when_model_splits_more_than_source(monke
         " 3,핵심 기능을 살펴보겠습니다."
     )
     fake_payload = {"result": {"message": {"content": raw_toon}}}
+    monkeypatch.setattr(main.full_generator, "use_fallback", False)
     monkeypatch.setattr(full_gen_module.requests, "post", lambda *a, **k: _FakeResponse(fake_payload))
 
     response = client.post(
@@ -420,6 +424,7 @@ def test_script_partial_parses_toon_and_updates_slide(monkeypatch, db_session_fa
 
     raw_toon = "slides[1]{slide_number,script}:\n 3,다시 쓴 세 번째 슬라이드 대본입니다."
     fake_payload = {"result": {"message": {"content": raw_toon}}}
+    monkeypatch.setattr(main.partial_generator, "use_fallback", False)
     monkeypatch.setattr(partial_gen_module.requests, "post", lambda *a, **k: _FakeResponse(fake_payload))
 
     response = client.post(
@@ -441,7 +446,8 @@ def test_script_partial_parses_toon_and_updates_slide(monkeypatch, db_session_fa
 
 def test_script_partial_fails_without_api_key(monkeypatch, db_session_factory):
     project_id = _create_project(db_session_factory, [(3, "내용")], script_map={3: "기존 대본입니다."})
-    monkeypatch.setattr(main.partial_generator, "api_key", None)
+    # 키가 없으면 use_fallback=True → 네트워크 없이 None 반환 → 502 (오프라인에서도 결정적)
+    monkeypatch.setattr(main.partial_generator, "use_fallback", True)
     response = client.post(
         "/api/script/partial",
         json={
@@ -501,6 +507,62 @@ def test_analysis_words_classifies_into_categories_and_persists(monkeypatch, db_
         assert saved_categories == {"특징": "장단음", "밭이": "연음", "국민": "표기-발음불일치"}
     finally:
         db.close()
+
+
+def test_analysis_words_long_vowel_fires_even_when_spelling_matches_pronunciation(monkeypatch, db_session_factory):
+    # 회귀 방지: 장단음은 철자=발음(is_different=False)인 단어에서도 판정되어야 한다.
+    # (예전엔 is_different=True일 때만 확인해서 장단음이 사실상 죽은 코드였음)
+    project_id = _create_project(db_session_factory, [(1, "내용")], script_map={1: "밤이 깊었습니다."})
+    # "밤"은 밤(chestnut)/밤ː(night) 동형이의어라 G2P상 철자=발음(is_different=False)이지만 장음일 수 있다.
+    monkeypatch.setattr(main.etri_analyzer, "extract_difficult_words", lambda script_text: ["밤"])
+    monkeypatch.setattr(main.g2p_converter, "convert_words",
+                        lambda words: [{"word": "밤", "phoneme": "[밤]", "is_different": False}])
+    monkeypatch.setattr(main.stdict_client, "has_long_vowel", lambda word: word == "밤")
+
+    response = client.post("/api/analysis/words", json={"project_id": project_id})
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["words"][0]["category"] == "장단음"
+    assert data["summary"]["장단음"] == 1
+
+
+def test_analysis_words_category_none_when_not_different_and_not_long_vowel(monkeypatch, db_session_factory):
+    # 철자=발음이고 장단음도 아니면 분류하지 않는다(None) — 이 early-return 분기의 회귀 방지.
+    project_id = _create_project(db_session_factory, [(1, "내용")], script_map={1: "가구 배치."})
+    monkeypatch.setattr(main.etri_analyzer, "extract_difficult_words", lambda script_text: ["가구"])
+    monkeypatch.setattr(main.g2p_converter, "convert_words",
+                        lambda words: [{"word": "가구", "phoneme": "[가구]", "is_different": False}])
+    monkeypatch.setattr(main.stdict_client, "has_long_vowel", lambda word: False)
+
+    response = client.post("/api/analysis/words", json={"project_id": project_id})
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["words"][0]["category"] is None
+    assert data["summary"] == {"장단음": 0, "연음": 0, "표기-발음불일치": 0}
+
+
+def test_analysis_words_requires_existing_project():
+    response = client.post("/api/analysis/words", json={"project_id": 999999})
+    assert response.status_code == 404
+
+
+def test_script_partial_requires_existing_project():
+    response = client.post(
+        "/api/script/partial",
+        json={"project_id": 999999, "target_slide": 1, "style": "격식체"},
+    )
+    assert response.status_code == 404
+
+
+def test_create_project_coaching_mode_rejects_corrupt_docx():
+    # 손상된(내용이 docx가 아닌) 파일은 raw 500이 아니라 깨끗한 422로 알려야 한다.
+    fake_file = io.BytesIO(b"this is not a real docx zip container")
+    response = client.post(
+        "/api/projects",
+        data={"mode": "coaching"},
+        files={"file": ("broken.docx", fake_file, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
+    )
+    assert response.status_code == 422
 
 
 def test_evaluation_audio_rejects_wrong_extension():

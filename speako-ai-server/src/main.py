@@ -15,6 +15,7 @@ import uvicorn
 import os
 import re
 import uuid
+import hmac
 
 # 1. 분리해둔 AI 클라이언트 모듈들 임포트
 from clova.full_generation.generator import FullScriptGenerator
@@ -72,7 +73,8 @@ if not _AUTH_ENABLED:
 def verify_api_key(x_api_key: str = Header(None)):
     if not _AUTH_ENABLED:
         return
-    if x_api_key != SPEAKO_API_KEY:
+    # 타이밍 사이드채널을 피하려고 상수 시간 비교를 쓴다. (헤더가 없으면 즉시 거부)
+    if not x_api_key or not hmac.compare_digest(x_api_key, SPEAKO_API_KEY):
         raise HTTPException(status_code=401, detail="유효하지 않거나 누락된 API 키입니다. (X-API-Key 헤더 필요)")
 
 
@@ -125,20 +127,25 @@ def _fallback_difficult_words(script_text: str, top_n: int = 6) -> list:
 
 
 DIFFICULT_WORD_CATEGORIES = ("장단음", "연음", "표기-발음불일치")
+# 한 번의 /api/analysis/words 요청이 외부 사전 API를 무제한으로 때리지 않도록 상한.
+# (단어마다 표준국어대사전 조회가 들어가므로, 대본이 아주 길어도 앞쪽 N개까지만 분류한다)
+MAX_DIFFICULT_WORDS = 40
 
 
 def _classify_word_category(word: str, is_different: bool):
     """
-    철자와 발음이 다른 단어를 장단음/연음/표기-발음불일치 3가지로 분류한다.
-    - 장단음: 표준국어대사전에 등록된 발음에 장음 표시(ː)가 있는 경우
-    - 연음: 받침+무초성 음절 구조가 있어 받침이 다음 음절로 넘어가는 경우
-    - 표기-발음불일치: 위 둘에 해당하지 않는 나머지 (비음화/경음화 등)
-    철자와 발음이 같으면(is_different=False) 분류하지 않는다(None).
+    발음 주의 단어를 장단음/연음/표기-발음불일치 3가지로 분류한다.
+    - 장단음: 표준국어대사전에 등록된 발음에 장음 표시(ː)가 있는 경우.
+              모음 길이는 한글 철자에는 드러나지 않으므로(예: 밤/밤ː는 표기가 같음),
+              G2P의 철자≠발음(is_different) 여부와 **무관하게** 독립적으로 판정한다.
+    - 연음: (철자≠발음이면서) 받침+무초성 음절 구조가 있어 받침이 다음 음절로 넘어가는 경우.
+    - 표기-발음불일치: 위 둘에 해당하지 않는 철자≠발음 (비음화/경음화 등).
+    철자=발음이고 장단음도 아니면 분류하지 않는다(None).
     """
-    if not is_different:
-        return None
     if stdict_client.has_long_vowel(word):
         return "장단음"
+    if not is_different:
+        return None
     if has_liaison_pattern(word):
         return "연음"
     return "표기-발음불일치"
@@ -217,13 +224,18 @@ async def create_project(
             _save_upload_with_limit(file, temp_file_path, MAX_PPT_SIZE_BYTES, ALLOWED_COACHING_EXTENSIONS)
 
             ext = os.path.splitext(file.filename or "")[1].lower()
-            if ext == ".pdf":
-                text = pdf_extractor.extract_full_text(temp_file_path)
-            elif ext == ".docx":
-                text = docx_extractor.extract_full_text(temp_file_path)
-            else:
-                with open(temp_file_path, "rb") as f:
-                    text = f.read().decode("utf-8", errors="ignore")
+            try:
+                if ext == ".pdf":
+                    text = pdf_extractor.extract_full_text(temp_file_path)
+                elif ext == ".docx":
+                    text = docx_extractor.extract_full_text(temp_file_path)
+                else:
+                    with open(temp_file_path, "rb") as f:
+                        text = f.read().decode("utf-8", errors="ignore")
+            except Exception as e:
+                # 손상되었거나 확장자만 바꾼 파일 등 — 라이브러리 예외를 그대로 500으로 내보내지 않고 422로 정직하게 알린다.
+                print(f"❌ 코칭용 파일 파싱 실패({ext}): {e}")
+                raise HTTPException(status_code=422, detail="파일을 열 수 없습니다. 파일이 손상되지 않았는지 확인해주세요.")
             text = text.strip()
 
             if not text:
@@ -241,10 +253,14 @@ async def create_project(
             _save_upload_with_limit(file, temp_file_path, MAX_PPT_SIZE_BYTES, ALLOWED_PPT_EXTENSIONS)
 
             ext = os.path.splitext(file.filename or "")[1].lower()
-            if ext == ".pdf":
-                result = pdf_extractor.extract_structured_data(temp_file_path)
-            else:
-                result = ppt_extractor.extract_structured_data(temp_file_path, topic_hint=topic or "", outline_hint=outline or "")
+            try:
+                if ext == ".pdf":
+                    result = pdf_extractor.extract_structured_data(temp_file_path)
+                else:
+                    result = ppt_extractor.extract_structured_data(temp_file_path, topic_hint=topic or "", outline_hint=outline or "")
+            except Exception as e:
+                print(f"❌ 슬라이드 파일 파싱 실패({ext}): {e}")
+                raise HTTPException(status_code=422, detail="파일을 열 수 없습니다. 파일이 손상되지 않았는지 확인해주세요.")
 
             if not result["slides"]:
                 raise HTTPException(status_code=422, detail="파일에서 텍스트를 추출하지 못했습니다.")
@@ -299,7 +315,9 @@ async def create_full_script(request: FullScriptRequest, db: Session = Depends(g
     if not project.slides:
         raise HTTPException(status_code=422, detail="이 프로젝트에 추출된 슬라이드가 없습니다.")
 
-    ppt_text = "\n".join(f"Slide {s.slide_number}: {s.source_content}" for s in project.slides)
+    # source_content가 None인 슬라이드(이전 라운드에 upsert로 생겨난 것)를 그대로 넣으면
+    # "Slide 2: None" 같은 문자열이 HCX에 전달되므로, None은 빈 문자열로 방어한다.
+    ppt_text = "\n".join(f"Slide {s.slide_number}: {s.source_content or ''}" for s in project.slides)
     result = full_generator.generate_full_script(ppt_text, request.presentation_time, request.style, request.extra_requirement)
 
     if not result or not result.get("slides"):
@@ -308,6 +326,8 @@ async def create_full_script(request: FullScriptRequest, db: Session = Depends(g
     # PPT 기반 프로젝트는 보통 원본 슬라이드 수와 생성된 슬라이드 수가 같지만,
     # topic/outline만으로 만든 프로젝트(원본 슬라이드 1개)는 모델이 알아서 여러 슬라이드로 쪼개 생성하기도 한다.
     # 이 경우 기존에 없는 슬라이드 번호는 새로 만들어서(upsert) 생성 결과가 유실되지 않게 한다.
+    # 새로 만든 슬라이드에는 원본 브리프(주제/목차)를 source_content로 복사해, 재생성 시 근거가 남게 한다.
+    base_source = next((s.source_content for s in project.slides if s.source_content), "")
     slides_by_number = {s.slide_number: s for s in project.slides}
     for item in result["slides"]:
         try:
@@ -318,7 +338,10 @@ async def create_full_script(request: FullScriptRequest, db: Session = Depends(g
         if slide:
             slide.script = item["script"]
         else:
-            new_slide = models.Slide(project_id=project.id, slide_number=slide_number, script=item["script"])
+            new_slide = models.Slide(
+                project_id=project.id, slide_number=slide_number,
+                source_content=base_source, script=item["script"],
+            )
             db.add(new_slide)
             slides_by_number[slide_number] = new_slide
     db.commit()
@@ -372,6 +395,11 @@ async def extract_and_convert_words(request: AnalysisRequest, db: Session = Depe
     if not extracted_words:
         print("⚠️ ETRI API 호출 실패 또는 결과 없음. 로컬 휴리스틱 fallback을 사용합니다.")
         extracted_words = _fallback_difficult_words(script_text)
+
+    # 단어마다 표준국어대사전 조회가 들어가므로, 상한을 둬서 외부 API 폭주를 막는다.
+    if len(extracted_words) > MAX_DIFFICULT_WORDS:
+        print(f"⚠️ 발음 주의 단어가 {len(extracted_words)}개라 상한({MAX_DIFFICULT_WORDS}개)까지만 분석합니다.")
+        extracted_words = extracted_words[:MAX_DIFFICULT_WORDS]
 
     # 2. G2P 모듈로 발음 기호 획득
     final_result = g2p_converter.convert_words(extracted_words)
@@ -451,13 +479,19 @@ async def evaluate_pronunciation(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"서버 내부 오류: {str(e)}")
+        # 내부 예외 메시지를 클라이언트에 그대로 노출하지 않는다 (구현 세부 유출 방지). 상세는 서버 로그에만.
+        print(f"❌ /api/evaluation/audio 처리 중 예기치 못한 오류: {e}")
+        raise HTTPException(status_code=502, detail="발음 평가 처리 중 서버 오류가 발생했습니다.")
     finally:
-        # 평가가 완료되었거나 에러가 났더라도, 서버 용량 낭비를 막기 위해 임시 파일 삭제
-        if os.path.exists(temp_file_path):
-            os.remove(temp_file_path)
-        if wav_file_path and os.path.exists(wav_file_path):
-            os.remove(wav_file_path)
+        # 평가가 완료되었거나 에러가 났더라도, 서버 용량 낭비를 막기 위해 임시 파일 삭제.
+        # Windows에서 파일 핸들이 아직 잡혀 있으면 os.remove가 PermissionError를 낼 수 있는데,
+        # finally에서 예외가 나면 이미 raise된 HTTPException을 덮어써 500으로 바뀌므로 개별적으로 방어한다.
+        for path in (temp_file_path, wav_file_path):
+            if path and os.path.exists(path):
+                try:
+                    os.remove(path)
+                except OSError as cleanup_err:
+                    print(f"⚠️ 임시 파일 삭제 실패({path}): {cleanup_err}")
 
 @api.get("/api/projects")
 async def list_projects(db: Session = Depends(get_db)):

@@ -9,13 +9,26 @@ load_dotenv()
 
 REQUEST_TIMEOUT_SECONDS = 30
 
+def _is_placeholder_key(api_key):
+    """HCX_API_KEY가 없거나 .env.example의 플레이스홀더 그대로면 True (안전 모드로 전환)."""
+    return not api_key or "여기에_" in api_key
+
+
 class FullScriptGenerator:
     def __init__(self):
         self.api_key = os.getenv("HCX_API_KEY")
         self.model_name = os.getenv("HCX_MODEL_NAME", "HCX-005")
         self.endpoint = f"https://clovastudio.stream.ntruss.com/v3/chat-completions/{self.model_name}"
+        # 키가 없으면 다른 4개 클라이언트(ETRI/Azure/Clova Voice/stdict)와 동일하게
+        # 네트워크 호출 없이 곧장 안전 모드로 빠진다. (플레이스홀더 키로 실제 요청을 보내면
+        # 무의미한 30초 타임아웃 대기 + 불필요한 외부 호출이 발생한다)
+        self.use_fallback = _is_placeholder_key(self.api_key)
+        if self.use_fallback:
+            print("⚠️ [경고] HCX_API_KEY가 설정되지 않았습니다. 대본 생성은 안전 모드(None 반환)로 동작합니다.")
 
     def generate_full_script(self, ppt_text, presentation_time, style, extra_requirement=""):
+        if self.use_fallback:
+            return None
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -109,8 +122,11 @@ class ScriptRefiner:
         self.api_key = os.getenv("HCX_API_KEY")
         self.model_name = os.getenv("HCX_MODEL_NAME", "HCX-005")
         self.endpoint = f"https://clovastudio.stream.ntruss.com/v3/chat-completions/{self.model_name}"
+        self.use_fallback = _is_placeholder_key(self.api_key)
 
     def refine_script(self, script_text, style="신뢰감을 주는 발표자 스타일"):
+        if self.use_fallback:
+            return None
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",

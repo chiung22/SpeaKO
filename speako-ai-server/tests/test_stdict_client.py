@@ -6,6 +6,14 @@ class _FakeResponse:
     def __init__(self, json_data=None, text=""):
         self._json_data = json_data
         self.text = text
+        # 클라이언트는 이제 response.content(bytes)를 파싱하며, 빈 본문이면 매칭 없음으로 처리한다.
+        # JSON 응답(search.do)은 본문이 비어있지 않으므로 content가 non-empty가 되도록 한다.
+        if text:
+            self.content = text.encode("utf-8") if isinstance(text, str) else text
+        elif json_data is not None:
+            self.content = b"{...json...}"
+        else:
+            self.content = b""
 
     def raise_for_status(self):
         pass

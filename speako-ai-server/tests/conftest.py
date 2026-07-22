@@ -19,6 +19,17 @@ def _isolate_usage_log(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_stdict(monkeypatch):
+    """
+    로컬 .env에 실제 STDICT_API_KEY가 있으면 /api/analysis/words 테스트가 표준국어대사전 API를
+    진짜로 호출하게 되어 느리고 네트워크 의존적이 된다. 기본적으로 장단음 조회를 꺼 둔다.
+    (장단음 판정 자체를 검증하는 test_stdict_client.py는 자체 StdictClient 인스턴스를 쓰므로 영향 없음)
+    """
+    import main
+    monkeypatch.setattr(main.stdict_client, "use_fallback", True)
+
+
+@pytest.fixture(autouse=True)
 def db_session_factory():
     """
     테스트가 실제 speako-ai-server/data/speako.db를 건드리지 않도록,
