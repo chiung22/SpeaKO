@@ -13,6 +13,12 @@ _MIN_OCR_IMAGE_WIDTH = 150
 _MIN_OCR_IMAGE_HEIGHT = 100
 # HCX-005 비전 입력 제약(가로세로 비율 1:5~5:1)을 벗어나는 길쭉한 이미지도 제외
 _MAX_OCR_ASPECT_RATIO = 5.0
+# 비전 호출은 슬라이드당 유료 API 호출이다. 한 장에 이미지가 수십 개 박힌 PPT도 있어서
+# (실측: 23장짜리에 후보 이미지 97개) 큰 것부터 이만큼만 읽는다.
+_MAX_OCR_IMAGES_PER_SLIDE = 3
+# 이미 텍스트박스로 내용이 충분히 들어있는 슬라이드는 이미지를 읽어도 얻을 게 별로 없다.
+# 비전은 "텍스트가 거의 없는 슬라이드"를 살리는 용도로만 쓴다.
+_OCR_SKIP_TEXT_LENGTH = 50
 
 class PptExtractor:
     def __init__(self):
@@ -47,22 +53,35 @@ class PptExtractor:
             for i, slide in enumerate(prs.slides):
                 slide_texts = []
 
-                # 슬라이드 내의 모든 도형(Shape)에서 텍스트 추출
+                # 1차: 텍스트박스에서 바로 읽히는 글자를 순서대로 모으고,
+                #      이미지로만 들어간 내용은 후보로만 쌓아둔다(비전 호출은 유료라 뒤에서 추려서 한다).
+                ocr_candidates = []
                 for shape in slide.shapes:
                     if hasattr(shape, "text") and shape.text.strip():
                         slide_texts.append(shape.text.strip())
                     elif shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
-                        # 텍스트박스 없이 이미지로만 들어간 슬라이드 대응 (예: 캡처/스캔해서 넣은 장표).
-                        # 아이콘/구분선 같은 장식용 이미지는 크기/비율로 걸러내고, 내용이 있을 법한
-                        # 이미지만 비전 모델에 보낸다.
-                        width_px, height_px = shape.image.size
+                        # 아이콘/구분선 같은 장식용 이미지는 크기/비율로 걸러내고,
+                        # 내용이 있을 법한 이미지만 후보로 남긴다.
+                        try:
+                            image = shape.image
+                            width_px, height_px = image.size
+                        except Exception:
+                            continue
                         if width_px < _MIN_OCR_IMAGE_WIDTH or height_px < _MIN_OCR_IMAGE_HEIGHT:
                             continue
                         aspect_ratio = max(width_px, height_px) / max(1, min(width_px, height_px))
                         if aspect_ratio > _MAX_OCR_ASPECT_RATIO:
                             continue
+                        ocr_candidates.append((width_px * height_px, image))
 
-                        ocr_text = self.image_text_extractor.extract_text_from_image(shape.image.blob, context_hint)
+                # 2차: 텍스트가 거의 없는 슬라이드(= 이미지가 곧 내용인 장표)만 비전으로 읽는다.
+                #      큰 이미지일수록 본문일 확률이 높으니 넓이 순으로 상위 몇 장만 본다.
+                if ocr_candidates and len("".join(slide_texts)) < _OCR_SKIP_TEXT_LENGTH:
+                    ocr_candidates.sort(key=lambda item: item[0], reverse=True)
+                    for _, image in ocr_candidates[:_MAX_OCR_IMAGES_PER_SLIDE]:
+                        ocr_text = self.image_text_extractor.extract_text_from_image(
+                            image.blob, context_hint, image.content_type
+                        )
                         if ocr_text.strip():
                             slide_texts.append(ocr_text.strip())
 

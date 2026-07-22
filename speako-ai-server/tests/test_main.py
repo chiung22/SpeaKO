@@ -17,8 +17,11 @@ client = TestClient(app)
 
 
 class _FakeResponse:
-    def __init__(self, payload):
+    def __init__(self, payload, status_code=200, text=""):
         self._payload = payload
+        # 클라이언트가 status_code를 직접 보고 4xx/5xx면 응답 본문을 로그로 남긴다.
+        self.status_code = status_code
+        self.text = text
 
     def raise_for_status(self):
         pass
@@ -466,8 +469,8 @@ def test_analysis_words_requires_generated_script(db_session_factory):
     assert response.status_code == 422
 
 
-def test_analysis_words_falls_back_to_local_heuristic_when_etri_unavailable(db_session_factory):
-    # ETRI 키가 없어도, 프로젝트의 실제 대본 내용에서 뽑은 fallback 단어로 G2P 변환까지 끝까지 성공해야 한다.
+def test_analysis_words_uses_kiwi_when_etri_unavailable(db_session_factory):
+    # ETRI 키가 없어도, Kiwi 로컬 형태소 분석으로 실제 대본에서 명사/외국어를 뽑아 G2P 변환까지 성공해야 한다.
     project_id = _create_project(
         db_session_factory, [(1, "내용")], script_map={1: "메타버스와 인프라 구축의 특징을 살펴봅시다."}
     )
@@ -475,7 +478,10 @@ def test_analysis_words_falls_back_to_local_heuristic_when_etri_unavailable(db_s
     assert response.status_code == 200
     body = response.json()
     assert body["success"] is True
-    assert len(body["data"]["words"]) > 0
+    words = [w["word"] for w in body["data"]["words"]]
+    assert len(words) > 0
+    # Kiwi가 조사를 떼고 명사만 뽑았는지 — "메타버스"가 온전히(조사 없이) 잡혀야 한다.
+    assert "메타버스" in words
     assert set(body["data"]["summary"].keys()) == {"장단음", "연음", "표기-발음불일치"}
 
 

@@ -21,6 +21,7 @@ import hmac
 from clova.full_generation.generator import FullScriptGenerator
 from clova.partial_generation.generator import PartialScriptGenerator
 from etri.etri_client import EtriLanguageAnalyzer
+from nlp.kiwi_analyzer import KiwiAnalyzer
 from g2p.g2p_client import G2pConverter
 from azure_speech.azure_client import PronunciationEvaluator
 from utils.ppt_extractor import PptExtractor
@@ -111,6 +112,7 @@ def _save_upload_with_limit(upload_file: UploadFile, dest_path: str, max_bytes: 
 full_generator = FullScriptGenerator()
 partial_generator = PartialScriptGenerator()
 etri_analyzer = EtriLanguageAnalyzer()
+kiwi_analyzer = KiwiAnalyzer()
 g2p_converter = G2pConverter()
 azure_evaluator = PronunciationEvaluator()
 ppt_extractor = PptExtractor()
@@ -387,13 +389,18 @@ async def extract_and_convert_words(request: AnalysisRequest, db: Session = Depe
     if not script_text:
         raise HTTPException(status_code=422, detail="먼저 /api/script/full로 전체 대본을 생성해주세요.")
 
-    # 1. ETRI API로 단어 추출
-    extracted_words = etri_analyzer.extract_difficult_words(script_text)
+    # "Slide N:" 라벨은 대본 내용이 아니므로 분석 전에 떼어낸다 (안 그러면 "Slide"가 외국어로 잡힘).
+    analysis_text = re.sub(r"Slide \d+:", " ", script_text)
 
-    # ETRI API 키가 없거나 오류가 발생했을 때를 대비한 안전 모드(Fallback).
-    # 실제 대본 내용과 무관한 고정 리스트 대신, 이 프로젝트의 대본에서 직접 후보를 뽑는다.
+    # 단어 추출은 3단계 폴백 체인:
+    # 1) ETRI WiseNLU (키가 있을 때만 — 없으면 즉시 빈 리스트)
+    # 2) Kiwi 로컬 형태소 분석기 (키 불필요, 현재 주력. ETRI 키 발급되면 1)이 우선함)
+    # 3) 빈도 기반 휴리스틱 (Kiwi 로드까지 실패한 극단적 상황의 최후 방어)
+    extracted_words = etri_analyzer.extract_difficult_words(analysis_text)
     if not extracted_words:
-        print("⚠️ ETRI API 호출 실패 또는 결과 없음. 로컬 휴리스틱 fallback을 사용합니다.")
+        extracted_words = kiwi_analyzer.extract_difficult_words(analysis_text)
+    if not extracted_words:
+        print("⚠️ ETRI/Kiwi 모두 결과 없음. 빈도 기반 휴리스틱 폴백을 사용합니다.")
         extracted_words = _fallback_difficult_words(script_text)
 
     # 단어마다 표준국어대사전 조회가 들어가므로, 상한을 둬서 외부 API 폭주를 막는다.
