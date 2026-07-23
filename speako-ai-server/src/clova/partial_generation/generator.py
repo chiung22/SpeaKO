@@ -4,21 +4,11 @@ from dotenv import load_dotenv
 
 from utils.usage_tracker import log_hcx_call
 from clova.toon_parser import parse_toon_slides
+from clova.styles import STYLE_INSTRUCTIONS  # noqa: F401 (기존 임포트 경로 호환)
 
 load_dotenv()
 
 REQUEST_TIMEOUT_SECONDS = 30
-
-STYLE_INSTRUCTIONS = {
-    "격식체": (
-        "공식적이고 전문적인 어조의 격식체로 작성하세요. "
-        "정중한 하십시오체(~습니다/~드립니다)를 사용하는 격식 있는 발표 어투를 유지하세요."
-    ),
-    "편안한 말투": (
-        "청중과 편하게 대화하듯 말하는 친근하고 자연스러운 대화체(~해요/~네요 톤)로 작성하세요. "
-        "딱딱하지 않은 편안한 발표 어투를 유지하세요."
-    ),
-}
 
 
 class PartialScriptGenerator:

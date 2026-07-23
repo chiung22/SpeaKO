@@ -8,6 +8,7 @@ if sys.stdout.encoding.lower() != "utf-8":
 
 from fastapi import FastAPI, APIRouter, UploadFile, File, Form, Header, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from typing import Literal, Optional
@@ -21,6 +22,7 @@ import hmac
 from clova.full_generation.generator import FullScriptGenerator
 from clova.partial_generation.generator import PartialScriptGenerator
 from etri.etri_client import EtriLanguageAnalyzer
+from nlp.kiwi_analyzer import KiwiAnalyzer
 from g2p.g2p_client import G2pConverter
 from azure_speech.azure_client import PronunciationEvaluator
 from utils.ppt_extractor import PptExtractor
@@ -58,7 +60,9 @@ MAX_PPT_SIZE_BYTES = 20 * 1024 * 1024   # 20MB
 MAX_AUDIO_SIZE_BYTES = 10 * 1024 * 1024  # 10MB
 ALLOWED_PPT_EXTENSIONS = {".pptx", ".pdf"}
 ALLOWED_COACHING_EXTENSIONS = {".docx", ".txt", ".pdf"}
-ALLOWED_AUDIO_EXTENSIONS = {".wav", ".mp3", ".m4a"}
+# 브라우저 MediaRecorder는 기본적으로 webm/opus(Chrome·Firefox·Edge)나 mp4/m4a(Safari)로 녹음한다.
+# ffmpeg가 이 포맷들을 전부 16kHz mono WAV로 변환하므로(convert_to_wav), 프론트가 녹음한 걸 그대로 받는다.
+ALLOWED_AUDIO_EXTENSIONS = {".wav", ".mp3", ".m4a", ".webm"}
 UPLOAD_CHUNK_SIZE = 1024 * 1024  # 1MB
 
 # /api/* 호출 인증 (X-API-Key 헤더). 값이 비어있거나 플레이스홀더면 로컬 개발 편의를 위해 인증을 건너뛴다.
@@ -111,6 +115,7 @@ def _save_upload_with_limit(upload_file: UploadFile, dest_path: str, max_bytes: 
 full_generator = FullScriptGenerator()
 partial_generator = PartialScriptGenerator()
 etri_analyzer = EtriLanguageAnalyzer()
+kiwi_analyzer = KiwiAnalyzer()
 g2p_converter = G2pConverter()
 azure_evaluator = PronunciationEvaluator()
 ppt_extractor = PptExtractor()
@@ -318,7 +323,16 @@ async def create_full_script(request: FullScriptRequest, db: Session = Depends(g
     # source_content가 None인 슬라이드(이전 라운드에 upsert로 생겨난 것)를 그대로 넣으면
     # "Slide 2: None" 같은 문자열이 HCX에 전달되므로, None은 빈 문자열로 방어한다.
     ppt_text = "\n".join(f"Slide {s.slide_number}: {s.source_content or ''}" for s in project.slides)
-    result = full_generator.generate_full_script(ppt_text, request.presentation_time, request.style, request.extra_requirement)
+    # 대본 생성은 슬라이드 수만큼 HCX를 호출하는 무거운 작업이다(내부에서 동시 호출로 병렬화하지만
+    # 여전히 수 초~십수 초). async 핸들러에서 동기 함수를 그냥 부르면 그동안 이벤트 루프가 막혀
+    # 다른 요청까지 멈추므로, 스레드풀로 오프로드해서 루프를 비워 둔다.
+    result = await run_in_threadpool(
+        full_generator.generate_full_script,
+        ppt_text,
+        request.presentation_time,
+        request.style,
+        request.extra_requirement,
+    )
 
     if not result or not result.get("slides"):
         raise HTTPException(status_code=502, detail="대본 생성에 실패했습니다.")
@@ -387,13 +401,18 @@ async def extract_and_convert_words(request: AnalysisRequest, db: Session = Depe
     if not script_text:
         raise HTTPException(status_code=422, detail="먼저 /api/script/full로 전체 대본을 생성해주세요.")
 
-    # 1. ETRI API로 단어 추출
-    extracted_words = etri_analyzer.extract_difficult_words(script_text)
+    # "Slide N:" 라벨은 대본 내용이 아니므로 분석 전에 떼어낸다 (안 그러면 "Slide"가 외국어로 잡힘).
+    analysis_text = re.sub(r"Slide \d+:", " ", script_text)
 
-    # ETRI API 키가 없거나 오류가 발생했을 때를 대비한 안전 모드(Fallback).
-    # 실제 대본 내용과 무관한 고정 리스트 대신, 이 프로젝트의 대본에서 직접 후보를 뽑는다.
+    # 단어 추출은 3단계 폴백 체인:
+    # 1) ETRI WiseNLU (키가 있을 때만 — 없으면 즉시 빈 리스트)
+    # 2) Kiwi 로컬 형태소 분석기 (키 불필요, 현재 주력. ETRI 키 발급되면 1)이 우선함)
+    # 3) 빈도 기반 휴리스틱 (Kiwi 로드까지 실패한 극단적 상황의 최후 방어)
+    extracted_words = etri_analyzer.extract_difficult_words(analysis_text)
     if not extracted_words:
-        print("⚠️ ETRI API 호출 실패 또는 결과 없음. 로컬 휴리스틱 fallback을 사용합니다.")
+        extracted_words = kiwi_analyzer.extract_difficult_words(analysis_text)
+    if not extracted_words:
+        print("⚠️ ETRI/Kiwi 모두 결과 없음. 빈도 기반 휴리스틱 폴백을 사용합니다.")
         extracted_words = _fallback_difficult_words(script_text)
 
     # 단어마다 표준국어대사전 조회가 들어가므로, 상한을 둬서 외부 API 폭주를 막는다.

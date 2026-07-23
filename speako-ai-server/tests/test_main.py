@@ -17,8 +17,11 @@ client = TestClient(app)
 
 
 class _FakeResponse:
-    def __init__(self, payload):
+    def __init__(self, payload, status_code=200, text=""):
         self._payload = payload
+        # 클라이언트가 status_code를 직접 보고 4xx/5xx면 응답 본문을 로그로 남긴다.
+        self.status_code = status_code
+        self.text = text
 
     def raise_for_status(self):
         pass
@@ -466,8 +469,8 @@ def test_analysis_words_requires_generated_script(db_session_factory):
     assert response.status_code == 422
 
 
-def test_analysis_words_falls_back_to_local_heuristic_when_etri_unavailable(db_session_factory):
-    # ETRI 키가 없어도, 프로젝트의 실제 대본 내용에서 뽑은 fallback 단어로 G2P 변환까지 끝까지 성공해야 한다.
+def test_analysis_words_uses_kiwi_when_etri_unavailable(db_session_factory):
+    # ETRI 키가 없어도, Kiwi 로컬 형태소 분석으로 실제 대본에서 명사/외국어를 뽑아 G2P 변환까지 성공해야 한다.
     project_id = _create_project(
         db_session_factory, [(1, "내용")], script_map={1: "메타버스와 인프라 구축의 특징을 살펴봅시다."}
     )
@@ -475,7 +478,10 @@ def test_analysis_words_falls_back_to_local_heuristic_when_etri_unavailable(db_s
     assert response.status_code == 200
     body = response.json()
     assert body["success"] is True
-    assert len(body["data"]["words"]) > 0
+    words = [w["word"] for w in body["data"]["words"]]
+    assert len(words) > 0
+    # Kiwi가 조사를 떼고 명사만 뽑았는지 — "메타버스"가 온전히(조사 없이) 잡혀야 한다.
+    assert "메타버스" in words
     assert set(body["data"]["summary"].keys()) == {"장단음", "연음", "표기-발음불일치"}
 
 
@@ -566,7 +572,7 @@ def test_create_project_coaching_mode_rejects_corrupt_docx():
 
 
 def test_evaluation_audio_rejects_wrong_extension():
-    # WAV/MP3/M4A 외 확장자(예: OGG)는 여전히 거부해야 한다.
+    # 허용 목록(WAV/MP3/M4A/WEBM) 밖 확장자(예: OGG)는 여전히 거부해야 한다.
     fake_file = io.BytesIO(b"not an audio file")
     response = client.post(
         "/api/evaluation/audio",
@@ -574,6 +580,40 @@ def test_evaluation_audio_rejects_wrong_extension():
         files={"audio_file": ("clip.ogg", fake_file, "audio/ogg")},
     )
     assert response.status_code == 415
+
+
+def test_evaluation_audio_accepts_browser_webm(monkeypatch, db_session_factory):
+    # 브라우저 MediaRecorder 기본 포맷(webm)을 받아 ffmpeg 변환 후 평가해야 한다.
+    # (프론트가 녹음한 걸 그대로 던질 수 있어야 함 — webm이 415로 막히면 안 됨)
+    project_id = _create_project(db_session_factory, [(1, "내용")], script_map={1: "테스트 문장입니다."})
+
+    converted = []
+
+    def _fake_convert(input_path, output_path):
+        converted.append((input_path, output_path))
+        with open(output_path, "wb") as f:
+            f.write(b"fake wav bytes")
+        return True
+
+    monkeypatch.setattr(main.audio_converter, "convert_to_wav", _fake_convert)
+    monkeypatch.setattr(
+        main.azure_evaluator,
+        "evaluate_audio",
+        lambda audio_file_path, reference_text: {
+            "status": "success",
+            "scores": {"accuracy": 88.0, "fluency": 88.0, "completeness": 88.0, "pronunciation_score": 88.0},
+            "words_detail": [],
+        },
+    )
+
+    fake_file = io.BytesIO(b"fake webm bytes")
+    response = client.post(
+        "/api/evaluation/audio",
+        data={"project_id": str(project_id)},
+        files={"audio_file": ("recording.webm", fake_file, "audio/webm")},
+    )
+    assert response.status_code == 200
+    assert len(converted) == 1  # webm은 wav가 아니므로 반드시 변환을 거쳐야 한다
 
 
 def test_evaluation_audio_converts_mp3_before_evaluating(monkeypatch, db_session_factory):
