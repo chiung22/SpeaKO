@@ -59,7 +59,9 @@ MAX_PPT_SIZE_BYTES = 20 * 1024 * 1024   # 20MB
 MAX_AUDIO_SIZE_BYTES = 10 * 1024 * 1024  # 10MB
 ALLOWED_PPT_EXTENSIONS = {".pptx", ".pdf"}
 ALLOWED_COACHING_EXTENSIONS = {".docx", ".txt", ".pdf"}
-ALLOWED_AUDIO_EXTENSIONS = {".wav", ".mp3", ".m4a"}
+# 브라우저 MediaRecorder는 기본적으로 webm/opus(Chrome·Firefox·Edge)나 mp4/m4a(Safari)로 녹음한다.
+# ffmpeg가 이 포맷들을 전부 16kHz mono WAV로 변환하므로(convert_to_wav), 프론트가 녹음한 걸 그대로 받는다.
+ALLOWED_AUDIO_EXTENSIONS = {".wav", ".mp3", ".m4a", ".webm"}
 UPLOAD_CHUNK_SIZE = 1024 * 1024  # 1MB
 
 # /api/* 호출 인증 (X-API-Key 헤더). 값이 비어있거나 플레이스홀더면 로컬 개발 편의를 위해 인증을 건너뛴다.

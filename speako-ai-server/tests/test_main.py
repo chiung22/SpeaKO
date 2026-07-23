@@ -572,7 +572,7 @@ def test_create_project_coaching_mode_rejects_corrupt_docx():
 
 
 def test_evaluation_audio_rejects_wrong_extension():
-    # WAV/MP3/M4A 외 확장자(예: OGG)는 여전히 거부해야 한다.
+    # 허용 목록(WAV/MP3/M4A/WEBM) 밖 확장자(예: OGG)는 여전히 거부해야 한다.
     fake_file = io.BytesIO(b"not an audio file")
     response = client.post(
         "/api/evaluation/audio",
@@ -580,6 +580,40 @@ def test_evaluation_audio_rejects_wrong_extension():
         files={"audio_file": ("clip.ogg", fake_file, "audio/ogg")},
     )
     assert response.status_code == 415
+
+
+def test_evaluation_audio_accepts_browser_webm(monkeypatch, db_session_factory):
+    # 브라우저 MediaRecorder 기본 포맷(webm)을 받아 ffmpeg 변환 후 평가해야 한다.
+    # (프론트가 녹음한 걸 그대로 던질 수 있어야 함 — webm이 415로 막히면 안 됨)
+    project_id = _create_project(db_session_factory, [(1, "내용")], script_map={1: "테스트 문장입니다."})
+
+    converted = []
+
+    def _fake_convert(input_path, output_path):
+        converted.append((input_path, output_path))
+        with open(output_path, "wb") as f:
+            f.write(b"fake wav bytes")
+        return True
+
+    monkeypatch.setattr(main.audio_converter, "convert_to_wav", _fake_convert)
+    monkeypatch.setattr(
+        main.azure_evaluator,
+        "evaluate_audio",
+        lambda audio_file_path, reference_text: {
+            "status": "success",
+            "scores": {"accuracy": 88.0, "fluency": 88.0, "completeness": 88.0, "pronunciation_score": 88.0},
+            "words_detail": [],
+        },
+    )
+
+    fake_file = io.BytesIO(b"fake webm bytes")
+    response = client.post(
+        "/api/evaluation/audio",
+        data={"project_id": str(project_id)},
+        files={"audio_file": ("recording.webm", fake_file, "audio/webm")},
+    )
+    assert response.status_code == 200
+    assert len(converted) == 1  # webm은 wav가 아니므로 반드시 변환을 거쳐야 한다
 
 
 def test_evaluation_audio_converts_mp3_before_evaluating(monkeypatch, db_session_factory):
