@@ -5,6 +5,12 @@ from dotenv import load_dotenv
 
 from utils.usage_tracker import log_hcx_call
 from clova.toon_parser import parse_toon_slides
+from clova.styles import (
+    FIRST_SLIDE_INSTRUCTION,
+    LAST_SLIDE_INSTRUCTION,
+    MIDDLE_SLIDE_INSTRUCTION,
+    style_instruction,
+)
 
 load_dotenv()
 
@@ -59,7 +65,7 @@ def _position_label(index, total):
 
     매 슬라이드를 독립 요청으로 만들면 모델은 자기가 발표 중간에 있다는 걸 모른다.
     위치를 단순 라벨("3번째 슬라이드")로만 주면 무시하고 장마다 "안녕하세요"로 시작한다
-    (실측: 19장 중 16장). 그래서 하지 말아야 할 것을 문장으로 못박는다.
+    (실측: 19장 중 16장). 그래서 하지 말아야 할 것을 문장으로 못박는다(clova/styles.py).
 
     ⚠️ 이웃 슬라이드의 "내용"을 맥락으로 함께 넘겨봤지만 역효과였다 — 모델이 그 내용까지
     대본으로 써버려서(3번 대본이 4번 내용을 설명) 정렬이 다시 깨졌다. 위치만 알려준다.
@@ -67,18 +73,10 @@ def _position_label(index, total):
     if total <= 1:
         return ""
     if index == 0:
-        return f"전체 {total}장 중 첫 번째 슬라이드입니다. 인사와 발표 주제 소개로 시작하세요."
+        return f"전체 {total}장 중 첫 번째 슬라이드입니다. {FIRST_SLIDE_INSTRUCTION}"
     if index == total - 1:
-        return (
-            f"전체 {total}장 중 마지막 슬라이드입니다. 이미 발표가 진행 중이므로 인사말로 시작하지 말고, "
-            "마무리 인사로 끝맺으세요."
-        )
-    return (
-        f"전체 {total}장 중 {index + 1}번째 슬라이드입니다. 이미 발표가 진행 중입니다. "
-        "'안녕하세요' '안녕하십니까' '반갑습니다' '오늘은' '오늘 발표에서는' 같은 인사말이나 "
-        "발표를 여는 표현으로 시작하지 말고, 곧바로 이 슬라이드의 내용부터 말하세요. "
-        "마무리 인사(감사합니다 등)도 넣지 마세요."
-    )
+        return f"전체 {total}장 중 마지막 슬라이드입니다. {LAST_SLIDE_INSTRUCTION}"
+    return f"전체 {total}장 중 {index + 1}번째 슬라이드입니다. {MIDDLE_SLIDE_INSTRUCTION}"
 
 
 class FullScriptGenerator:
@@ -163,10 +161,10 @@ class FullScriptGenerator:
 
         [작성 가이드라인]
         1. 슬라이드에 적힌 내용만 다루세요. 없는 내용을 지어내지 마세요.
-        2. 발표자가 청중에게 직접 말하듯 구어체로 작성하세요.
+        2. 발표자가 청중 앞에서 실제로 말하듯 자연스럽게 작성하세요. 문어체(보고서 문장)는 피하되,
+           말투(문장 끝맺음)는 아래 [반드시 지킬 것 — 말투]를 그대로 따르세요.
         3. [추가 요구사항]이 주어지면 반드시 반영하세요.
-        4. [위치]가 첫 슬라이드가 아니면 인사말·자기소개를 쓰지 마세요(이미 발표 중입니다).
-           마지막 슬라이드가 아니면 마무리 인사도 쓰지 마세요.
+        4. [반드시 지킬 것 — 위치]의 지시를 그대로 따르세요.
 
         출력은 대본 문장만 쓰세요. "Slide 1:" 같은 라벨이나 머리말, 해설을 덧붙이지 마세요.
         """
@@ -177,7 +175,8 @@ class FullScriptGenerator:
         사용자가 제공하는 [PPT 텍스트]와 [발표 조건]을 바탕으로 자연스러운 전체 발표 대본을 작성해주세요.
 
         [작성 가이드라인]
-        1. 각 슬라이드의 핵심 메시지를 파악하여 구어체로 작성하세요.
+        1. 각 슬라이드의 핵심 메시지를 파악해 발표자가 말하듯 작성하세요.
+           말투(문장 끝맺음)는 [반드시 지킬 것 — 말투]를 그대로 따르세요.
         2. 대본 내용(script) 안에는 쉼표(,) 대신 마침표(.)나 띄어쓰기를 사용하세요. (파싱 오류 방지)
         3. [추가 요구사항]이 주어지면 반드시 반영하세요.
         4. 출력은 반드시 토큰 최적화된 아래의 [TOON 포맷]을 엄격히 준수하며, 다른 텍스트는 덧붙이지 마세요.
@@ -191,12 +190,12 @@ class FullScriptGenerator:
         """
 
     def _build_user_prompt(self, ppt_text, presentation_time, style, extra_requirement, position):
-        # [위치] 지시는 프롬프트 맨 뒤에 둔다. 중간에 끼워 넣었더니 모델이 무시하고
-        # 장마다 인사말로 시작했다(19장 중 16장).
+        # [위치]와 [말투] 지시는 프롬프트 맨 뒤에 둔다. 중간에 끼워 넣었더니 모델이 무시하고
+        # 장마다 인사말로 시작하거나(19장 중 16장) 해요체로 흘러내렸다.
+        # "발표 스타일: 격식체"처럼 단어만 주면 안 되고, 어미까지 문장으로 못박아야 한다.
         return f"""
         [발표 조건]
         - 발표 시간: {presentation_time}분
-        - 발표 스타일: {style}
 
         [추가 요구사항]
         {extra_requirement or '없음'}
@@ -206,6 +205,9 @@ class FullScriptGenerator:
 
         [반드시 지킬 것 — 위치]
         {position or '전체 발표 대본을 작성하세요.'}
+
+        [반드시 지킬 것 — 말투]
+        {style_instruction(style)}
         """
 
     def _request_raw(self, ppt_text, presentation_time, style, extra_requirement, valid_slide_numbers):
@@ -283,7 +285,7 @@ class ScriptRefiner:
         self.endpoint = f"https://clovastudio.stream.ntruss.com/v3/chat-completions/{self.model_name}"
         self.use_fallback = _is_placeholder_key(self.api_key)
 
-    def refine_script(self, script_text, style="신뢰감을 주는 발표자 스타일"):
+    def refine_script(self, script_text, style="격식체"):
         """
         생성 단계와 같은 이유로(입력이 길면 모델이 슬라이드를 빠뜨리거나 줄글로 합쳐버림)
         긴 대본은 나눠서 다듬는다. 다듬은 결과에서 슬라이드가 사라졌으면 그 묶음은 초안을 그대로 쓴다.
@@ -320,24 +322,25 @@ class ScriptRefiner:
         system_prompt = """
         당신은 발표 대본을 다듬는 전문 감수자입니다.
         입력으로 주어지는 초안 대본은 "Slide N: 내용" 형식의 줄들로 구성되어 있습니다.
-        이 대본을 발표자가 청중 앞에서 실제로 말하듯 자연스러운 1인칭 구어체로 다듬어주세요.
+        이 대본을 발표자가 청중 앞에서 실제로 말하듯 자연스럽게 다듬어주세요.
 
         [다듬을 때 기준]
         1. 관찰자 시점("~설명합니다", "~보여줍니다")이 아니라 발표자가 청중에게 직접 말하는 어투("~설명드리겠습니다", "~보여드리겠습니다")로 통일하세요.
-        2. 문장이 어색하거나 번역체스러운 부분, 반복되는 표현은 자연스러운 한국어 구어체로 고치세요.
-        3. 각 슬라이드의 핵심 내용과 정보, 슬라이드 순서는 그대로 유지하세요. 새로운 정보를 추가하거나 빼지 마세요.
-        4. "Slide N:" 라벨과 슬라이드 개수는 절대 바꾸지 마세요. 입력에 있던 슬라이드 번호를 그대로 유지하세요.
-        5. 과도하게 길이를 늘리거나 줄이지 말고, 자연스러움 개선에만 집중하세요.
+        2. 문장이 어색하거나 번역체스러운 부분, 반복되는 표현은 자연스럽게 고치세요.
+        3. 문장 끝맺음(말투)은 아래 [반드시 지킬 것 — 말투]를 그대로 따르세요.
+        4. 각 슬라이드의 핵심 내용과 정보, 슬라이드 순서는 그대로 유지하세요. 새로운 정보를 추가하거나 빼지 마세요.
+        5. "Slide N:" 라벨과 슬라이드 개수는 절대 바꾸지 마세요. 입력에 있던 슬라이드 번호를 그대로 유지하세요.
+        6. 과도하게 길이를 늘리거나 줄이지 말고, 자연스러움 개선에만 집중하세요.
 
         출력은 반드시 입력과 동일하게 "Slide N: 내용" 형식의 줄들로만 구성하고, 다른 설명이나 안내 문구는 절대 덧붙이지 마세요.
         """
 
         user_prompt = f"""
-        [발표 스타일]
-        {style}
-
         [초안 대본]
         {script_text}
+
+        [반드시 지킬 것 — 말투]
+        {style_instruction(style)}
         """
 
         payload = {
