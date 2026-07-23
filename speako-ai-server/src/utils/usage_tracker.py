@@ -1,6 +1,12 @@
 import os
 import json
+import threading
 from datetime import datetime
+
+# 대본 생성이 슬라이드별로 병렬 호출되면서 log_hcx_call이 여러 스레드에서 동시에 불린다.
+# 각 log 함수는 상태 파일을 read-modify-write 하므로, 락이 없으면 갱신이 유실되거나
+# .usage_state.json이 깨진다. 모든 로깅을 이 락으로 직렬화한다.
+_state_lock = threading.Lock()
 
 # speako-ai-server/
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -117,40 +123,45 @@ def _save_and_write(state):
 
 
 def log_hcx_call(kind: str, prompt_tokens: int, completion_tokens: int, total_tokens: int):
-    state = _load_state()
-    state["hcx"]["calls"] += 1
-    state["hcx"]["prompt_tokens"] += prompt_tokens
-    state["hcx"]["completion_tokens"] += completion_tokens
-    state["hcx"]["total_tokens"] += total_tokens
-    _append_row(state, "HCX", f"{kind} 생성 — prompt {prompt_tokens} + completion {completion_tokens} = {total_tokens} tokens")
-    _save_and_write(state)
+    with _state_lock:
+        state = _load_state()
+        state["hcx"]["calls"] += 1
+        state["hcx"]["prompt_tokens"] += prompt_tokens
+        state["hcx"]["completion_tokens"] += completion_tokens
+        state["hcx"]["total_tokens"] += total_tokens
+        _append_row(state, "HCX", f"{kind} 생성 — prompt {prompt_tokens} + completion {completion_tokens} = {total_tokens} tokens")
+        _save_and_write(state)
 
 
 def log_etri_call():
-    state = _load_state()
-    state["etri"]["calls"] += 1
-    _append_row(state, "ETRI", "형태소 분석 호출 (무료)")
-    _save_and_write(state)
+    with _state_lock:
+        state = _load_state()
+        state["etri"]["calls"] += 1
+        _append_row(state, "ETRI", "형태소 분석 호출 (무료)")
+        _save_and_write(state)
 
 
 def log_azure_speech_call(audio_seconds: float, status: str):
-    state = _load_state()
-    state["azure_speech"]["calls"] += 1
-    state["azure_speech"]["audio_seconds"] += audio_seconds
-    _append_row(state, "Azure Speech", f"발음 평가 — 오디오 {audio_seconds:.1f}초 ({status})")
-    _save_and_write(state)
+    with _state_lock:
+        state = _load_state()
+        state["azure_speech"]["calls"] += 1
+        state["azure_speech"]["audio_seconds"] += audio_seconds
+        _append_row(state, "Azure Speech", f"발음 평가 — 오디오 {audio_seconds:.1f}초 ({status})")
+        _save_and_write(state)
 
 
 def log_stdict_call():
-    state = _load_state()
-    state["stdict"]["calls"] += 1
-    _append_row(state, "표준국어대사전", "장단음 조회 호출 (무료)")
-    _save_and_write(state)
+    with _state_lock:
+        state = _load_state()
+        state["stdict"]["calls"] += 1
+        _append_row(state, "표준국어대사전", "장단음 조회 호출 (무료)")
+        _save_and_write(state)
 
 
 def log_clova_voice_call(characters: int):
-    state = _load_state()
-    state["clova_voice"]["calls"] += 1
-    state["clova_voice"]["characters"] += characters
-    _append_row(state, "Clova Voice", f"TTS 합성 — {characters}자")
-    _save_and_write(state)
+    with _state_lock:
+        state = _load_state()
+        state["clova_voice"]["calls"] += 1
+        state["clova_voice"]["characters"] += characters
+        _append_row(state, "Clova Voice", f"TTS 합성 — {characters}자")
+        _save_and_write(state)

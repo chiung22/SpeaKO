@@ -1,6 +1,7 @@
 import os
 import re
 import requests
+from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 
 from utils.usage_tracker import log_hcx_call
@@ -15,6 +16,11 @@ from clova.styles import (
 load_dotenv()
 
 REQUEST_TIMEOUT_SECONDS = 30
+
+# 슬라이드별 생성/고도화는 서로 독립적이라 동시에 부를 수 있다. 순차로 30장을 부르면
+# 장당 2~4초 × 30 = 1~2분이 걸리지만, 동시에 부르면 그만큼 줄어든다.
+# 다만 HCX 레이트리밋이 있으므로 동시 개수에 상한을 둔다(환경변수로 조정 가능).
+MAX_CONCURRENT_REQUESTS = max(1, int(os.getenv("HCX_MAX_CONCURRENCY", "4")))
 
 # 고도화(리뷰)는 "Slide N:" 라벨을 그대로 유지하는 작업이라 여러 장을 함께 넘겨도 정렬이 안 밀린다.
 # 다만 입력이 길면 슬라이드를 통째로 빠뜨리므로 이 단위로 나눈다.
@@ -112,16 +118,25 @@ class FullScriptGenerator:
             return self._request_raw(ppt_text, presentation_time, style, extra_requirement, None)
 
         per_slide_time = max(1, round(presentation_time / len(blocks)))
-        all_slides = []
-        missing = []
-        for index, (number, block) in enumerate(blocks):
+
+        # 슬라이드별 호출은 서로 독립적이라(각 장은 자기 내용 + 위치만 씀) 동시에 부른다.
+        # 순서는 결과를 슬라이드 번호로 정렬해 맞추므로 완료 순서가 뒤섞여도 문제없다.
+        def build_one(item):
+            index, (number, block) = item
             slides = self._request_one_slide(
                 number, block, _position_label(index, len(blocks)), per_slide_time, style, extra_requirement
             )
-            if slides:
-                all_slides.extend(slides)
-            else:
-                missing.append(number)
+            return number, slides
+
+        all_slides = []
+        missing = []
+        workers = min(MAX_CONCURRENT_REQUESTS, len(blocks))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for number, slides in pool.map(build_one, enumerate(blocks)):
+                if slides:
+                    all_slides.extend(slides)
+                else:
+                    missing.append(number)
 
         if missing:
             print(f"  ⚠️ 슬라이드 {missing} 생성 실패(모델이 포맷을 안 지킴).")
@@ -297,18 +312,23 @@ class ScriptRefiner:
         if not blocks:
             return self._refine_chunk(script_text, style)
 
-        refined_parts = []
-        for start in range(0, len(blocks), REFINE_SLIDES_PER_REQUEST):
-            chunk = blocks[start:start + REFINE_SLIDES_PER_REQUEST]
-            chunk_text = "\n\n".join(block for _, block in chunk)
+        chunks = [blocks[start:start + REFINE_SLIDES_PER_REQUEST] for start in range(0, len(blocks), REFINE_SLIDES_PER_REQUEST)]
 
+        # 묶음(chunk)들도 서로 독립적이라 동시에 다듬는다. pool.map은 입력 순서대로 결과를 돌려주므로
+        # refined_parts를 그대로 이어 붙여도 슬라이드 순서가 유지된다.
+        def refine_one(chunk):
+            chunk_text = "\n\n".join(block for _, block in chunk)
             refined = self._refine_chunk(chunk_text, style)
             # 다듬다가 슬라이드를 잃어버렸거나 번호가 바뀌었으면 자연스러움보다 내용 보존이 우선이다.
             expected = [number for number, _ in chunk]
             if not refined or [number for number, _ in _split_slide_blocks(refined)] != expected:
                 print(f"  ⚠️ 슬라이드 {chunk[0][0]}~{chunk[-1][0]} 고도화 결과가 원본과 안 맞아 초안을 유지합니다.")
                 refined = chunk_text
-            refined_parts.append(refined)
+            return refined
+
+        workers = min(MAX_CONCURRENT_REQUESTS, len(chunks))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            refined_parts = list(pool.map(refine_one, chunks))
 
         return "\n\n".join(refined_parts)
 

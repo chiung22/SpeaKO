@@ -8,6 +8,7 @@ if sys.stdout.encoding.lower() != "utf-8":
 
 from fastapi import FastAPI, APIRouter, UploadFile, File, Form, Header, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from typing import Literal, Optional
@@ -322,7 +323,16 @@ async def create_full_script(request: FullScriptRequest, db: Session = Depends(g
     # source_content가 None인 슬라이드(이전 라운드에 upsert로 생겨난 것)를 그대로 넣으면
     # "Slide 2: None" 같은 문자열이 HCX에 전달되므로, None은 빈 문자열로 방어한다.
     ppt_text = "\n".join(f"Slide {s.slide_number}: {s.source_content or ''}" for s in project.slides)
-    result = full_generator.generate_full_script(ppt_text, request.presentation_time, request.style, request.extra_requirement)
+    # 대본 생성은 슬라이드 수만큼 HCX를 호출하는 무거운 작업이다(내부에서 동시 호출로 병렬화하지만
+    # 여전히 수 초~십수 초). async 핸들러에서 동기 함수를 그냥 부르면 그동안 이벤트 루프가 막혀
+    # 다른 요청까지 멈추므로, 스레드풀로 오프로드해서 루프를 비워 둔다.
+    result = await run_in_threadpool(
+        full_generator.generate_full_script,
+        ppt_text,
+        request.presentation_time,
+        request.style,
+        request.extra_requirement,
+    )
 
     if not result or not result.get("slides"):
         raise HTTPException(status_code=502, detail="대본 생성에 실패했습니다.")

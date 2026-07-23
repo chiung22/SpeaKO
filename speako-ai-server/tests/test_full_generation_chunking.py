@@ -108,26 +108,42 @@ def test_position_is_given_so_middle_slides_do_not_greet(monkeypatch):
     sent = _stub_hcx(monkeypatch, responder)
     _generator().generate_full_script(_ppt_text(3), 6, "격식체")
 
-    positions = [p.split("[반드시 지킬 것 — 위치]")[1] for p in sent]
-    assert "첫 번째" in positions[0]
-    assert "인사말" in positions[1] and "시작하지 말고" in positions[1]
-    assert "마지막" in positions[2]
-    # 이웃 슬라이드 내용이 프롬프트에 새어 들어가면 안 된다.
-    assert "3번 슬라이드 내용" not in sent[1]
+    # 슬라이드별 호출이 병렬이라 sent의 순서는 보장되지 않는다. 위치가 아니라 내용으로 프롬프트를 찾는다.
+    def position_for(slide_marker):
+        prompt = next(p for p in sent if slide_marker in p.split("[PPT 텍스트]")[1])
+        return prompt.split("[반드시 지킬 것 — 위치]")[1]
+
+    assert "첫 번째" in position_for("1번 슬라이드 내용")
+    middle = position_for("2번 슬라이드 내용")
+    assert "인사말" in middle and "시작하지 말고" in middle
+    assert "마지막" in position_for("3번 슬라이드 내용")
+    # 이웃 슬라이드 내용이 2번 프롬프트에 새어 들어가면 안 된다.
+    second = next(p for p in sent if "2번 슬라이드 내용" in p.split("[PPT 텍스트]")[1])
+    assert "3번 슬라이드 내용" not in second
 
 
 def test_failed_slide_is_retried_once(monkeypatch):
     """한 장이 실패하면 그 슬라이드는 영구 누락이므로 한 번은 다시 시도해야 한다."""
-    attempts = {"n": 0}
+    import threading
+
+    lock = threading.Lock()
+    failed_once = set()
 
     def responder(user_prompt):
-        attempts["n"] += 1
-        return None if attempts["n"] == 1 else "두 번째 시도 대본"
+        # 병렬 실행이라 스레드 안전하게, 1번 슬라이드만 첫 시도에서 실패시키고 재시도에서 성공시킨다.
+        if "1번 슬라이드 내용" in user_prompt.split("[PPT 텍스트]")[1]:
+            with lock:
+                first_try = "s1" not in failed_once
+                failed_once.add("s1")
+            return None if first_try else "두 번째 시도 대본"
+        return "2번 슬라이드 대본"
 
     _stub_hcx(monkeypatch, responder)
-    result = _generator().generate_full_script("Slide 1: 첫 내용\nSlide 2: 둘째 내용", 4, "격식체")
+    result = _generator().generate_full_script(_ppt_text(2), 4, "격식체")
 
-    assert result["slides"][0]["script"] == "두 번째 시도 대본"
+    scripts = {s["slide_number"]: s["script"] for s in result["slides"]}
+    assert scripts["1"] == "두 번째 시도 대본"  # 재시도로 살아남음
+    assert scripts["2"] == "2번 슬라이드 대본"
 
 
 def test_local_numbering_is_mapped_back_to_real_slide_numbers(monkeypatch):
