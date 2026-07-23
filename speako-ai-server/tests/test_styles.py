@@ -18,6 +18,18 @@ def test_formal_style_forbids_casual_endings():
         assert banned in formal, f"금지 어미 '{banned}'가 지시에 명시돼야 한다"
 
 
+def test_casual_style_targets_casual_endings_and_avoids_stiff():
+    """어미 고정은 스타일별로 달라야 한다 — 편안한 말투는 해요체를 지향하고 딱딱한 문어체를 피한다."""
+    casual = STYLE_INSTRUCTIONS["편안한 말투"]
+    assert "해요" in casual and "네요" in casual
+    assert "하십시오" in casual, "지나치게 격식 있는 어미로 새지 않도록 명시돼야 한다"
+
+
+def test_each_style_locks_different_endings():
+    """두 스타일의 지시가 서로 달라야 의미가 있다(같은 문장을 재사용하면 안 됨)."""
+    assert STYLE_INSTRUCTIONS["격식체"] != STYLE_INSTRUCTIONS["편안한 말투"]
+
+
 def test_unknown_style_falls_back_to_formal():
     assert style_instruction("존재하지-않는-스타일") == STYLE_INSTRUCTIONS["격식체"]
 
