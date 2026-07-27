@@ -170,12 +170,14 @@ class FullScriptRequest(BaseModel):
     presentation_time: int
     style: Literal["격식체", "편안한 말투"]
     extra_requirement: Optional[str] = ""
+    audience: Optional[str] = ""  # 발표 대상/청중 (피그마 '대상' 필드, 예: 교수님/면접관). 선택 입력.
 
 class PartialScriptRequest(BaseModel):
     project_id: int
     target_slide: int
     style: Literal["격식체", "편안한 말투"]
     extra_requirement: Optional[str] = ""
+    audience: Optional[str] = ""  # 발표 대상/청중. 선택 입력.
 
 class AnalysisRequest(BaseModel):
     project_id: int
@@ -332,6 +334,7 @@ async def create_full_script(request: FullScriptRequest, db: Session = Depends(g
         request.presentation_time,
         request.style,
         request.extra_requirement,
+        request.audience,
     )
 
     if not result or not result.get("slides"):
@@ -378,8 +381,13 @@ async def create_partial_script(request: PartialScriptRequest, db: Session = Dep
     if not original_script:
         raise HTTPException(status_code=422, detail="먼저 /api/script/full로 전체 대본을 생성해주세요.")
 
-    result = partial_generator.generate_partial_script(
-        original_script, request.target_slide, request.style, request.extra_requirement
+    result = await run_in_threadpool(
+        partial_generator.generate_partial_script,
+        original_script,
+        request.target_slide,
+        request.style,
+        request.extra_requirement,
+        request.audience,
     )
 
     if not result or "script" not in result:
