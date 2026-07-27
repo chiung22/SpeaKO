@@ -754,3 +754,79 @@ def test_list_and_get_project(db_session_factory):
 def test_get_project_returns_404_for_missing_project():
     response = client.get("/api/projects/999999")
     assert response.status_code == 404
+
+
+# ── 대본 편집 저장 (PUT) — 피그마 05 결과 화면의 수동/자동 저장 ──────────────────
+
+def test_update_slide_script_saves_edited_text(db_session_factory):
+    project_id = _create_project(db_session_factory, [(1, "내용1"), (2, "내용2")], script_map={1: "초안1", 2: "초안2"})
+
+    response = client.put(f"/api/projects/{project_id}/slides/2", json={"script": "사용자가 직접 고친 대본"})
+    assert response.status_code == 200
+
+    db = db_session_factory()
+    try:
+        project = db.get(models.Project, project_id)
+        slide2 = next(s for s in project.slides if s.slide_number == 2)
+        assert slide2.script == "사용자가 직접 고친 대본"
+        # 다른 슬라이드는 건드리지 않는다.
+        slide1 = next(s for s in project.slides if s.slide_number == 1)
+        assert slide1.script == "초안1"
+    finally:
+        db.close()
+
+
+def test_update_slide_script_allows_empty_string(db_session_factory):
+    """빈 문자열로 비우는 것도 편집이다(422가 아니라 저장돼야 한다)."""
+    project_id = _create_project(db_session_factory, [(1, "내용")], script_map={1: "초안"})
+    response = client.put(f"/api/projects/{project_id}/slides/1", json={"script": ""})
+    assert response.status_code == 200
+
+
+def test_update_slide_script_404_for_missing_slide(db_session_factory):
+    project_id = _create_project(db_session_factory, [(1, "내용")])
+    assert client.put(f"/api/projects/{project_id}/slides/99", json={"script": "x"}).status_code == 404
+    assert client.put("/api/projects/999999/slides/1", json={"script": "x"}).status_code == 404
+
+
+# ── 슬라이드 추가/삭제 (POST/DELETE) — 피그마 05-1 ─────────────────────────────
+
+def test_add_slide_appends_at_end_when_no_position(db_session_factory):
+    project_id = _create_project(db_session_factory, [(1, "A"), (2, "B")])
+    response = client.post(f"/api/projects/{project_id}/slides", json={"script": "새 대본"})
+    assert response.status_code == 200
+    slides = response.json()["data"]["slides"]
+    assert [s["slide_number"] for s in slides] == [1, 2, 3]
+    assert slides[2]["script"] == "새 대본"
+
+
+def test_add_slide_inserts_at_position_and_shifts_following(db_session_factory):
+    project_id = _create_project(db_session_factory, [(1, "A"), (2, "B"), (3, "C")], script_map={1: "a", 2: "b", 3: "c"})
+    response = client.post(f"/api/projects/{project_id}/slides", json={"position": 2, "script": "끼운 대본"})
+    assert response.status_code == 200
+    slides = response.json()["data"]["slides"]
+    # 1..N 연속 유지 + 2번 자리에 새 슬라이드, 기존 b/c는 뒤로 밀린다.
+    assert [s["slide_number"] for s in slides] == [1, 2, 3, 4]
+    assert [s["script"] for s in slides] == ["a", "끼운 대본", "b", "c"]
+
+
+def test_delete_slide_removes_and_resequences(db_session_factory):
+    project_id = _create_project(db_session_factory, [(1, "A"), (2, "B"), (3, "C")], script_map={1: "a", 2: "b", 3: "c"})
+    response = client.delete(f"/api/projects/{project_id}/slides/2")
+    assert response.status_code == 200
+    slides = response.json()["data"]["slides"]
+    # 2번을 지우면 3번이 2번으로 당겨져 1..N이 유지된다.
+    assert [s["slide_number"] for s in slides] == [1, 2]
+    assert [s["script"] for s in slides] == ["a", "c"]
+
+
+def test_delete_last_remaining_slide_is_rejected(db_session_factory):
+    project_id = _create_project(db_session_factory, [(1, "only")])
+    response = client.delete(f"/api/projects/{project_id}/slides/1")
+    assert response.status_code == 422
+
+
+def test_delete_slide_404_for_missing(db_session_factory):
+    project_id = _create_project(db_session_factory, [(1, "A"), (2, "B")])
+    assert client.delete(f"/api/projects/{project_id}/slides/99").status_code == 404
+    assert client.delete("/api/projects/999999/slides/1").status_code == 404

@@ -98,3 +98,16 @@ def test_audience_is_injected_into_generation_prompt(monkeypatch):
 
     assert all("교수님" in prompt for prompt in sent)
     assert all("대상" in prompt for prompt in sent)
+
+
+def test_topic_is_injected_into_generation_prompt(monkeypatch):
+    """피그마의 유일한 필수 입력 '발표 주제'가 생성 프롬프트에 실제로 반영되는지."""
+    generator = FullScriptGenerator()
+    generator.api_key = "test-key"
+    generator.use_fallback = False
+
+    sent = _capture_prompts(monkeypatch)
+    generator.generate_full_script("Slide 1: 첫 내용\nSlide 2: 둘째 내용", 4, "격식체", topic="Clip Route 서비스 소개")
+
+    assert all("Clip Route 서비스 소개" in prompt for prompt in sent)
+    assert all("발표 주제" in prompt for prompt in sent)
