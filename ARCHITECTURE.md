@@ -38,7 +38,7 @@ SpeaKO/
 2. 전체 대본 생성       POST /api/script/full        → FullScriptGenerator (HyperCLOVA X, TOON 포맷) → 슬라이드별로 DB 저장
 3. 부분 대본 재생성     POST /api/script/partial     → PartialScriptGenerator (HyperCLOVA X) → 해당 슬라이드 DB 갱신
 4. 발음 주의 단어 분석   POST /api/analysis/words     → (ETRI 키 있으면 ETRI, 없으면 Kiwi 로컬 분석) → G2pConverter → 카테고리 분류(장단음/연음/표기-발음불일치) → DB에 스냅샷 저장
-5. 사용자 발음 평가     POST /api/evaluation/audio   → (WAV 아니면 audio_converter로 변환) → PronunciationEvaluator (Azure Speech) → DB에 히스토리로 누적
+5. 사용자 발음 평가     POST /api/evaluation/audio   → (WAV 아니면 audio_converter로 변환) → PronunciationEvaluator (Azure Speech) → 점수를 1점 단위 정수(0~100)로 반올림 → DB에 히스토리로 누적
 6. 프로젝트 조회        GET /api/projects, /api/projects/{id} → 위에서 쌓인 슬라이드/대본/단어/평가 히스토리 조회
 ```
 

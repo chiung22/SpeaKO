@@ -182,6 +182,22 @@ class PartialScriptRequest(BaseModel):
 class AnalysisRequest(BaseModel):
     project_id: int
 
+
+def _round_scores_in_place(result: dict):
+    """
+    발음 평가 점수를 1점 단위(정수, 0~100)로 반올림한다. 프론트는 이 숫자를 그대로 표시만 하므로
+    표시 형태를 백엔드에서 확정한다. 전체 점수(overall_scores)와 단어별 정확도(words_detail)를 모두 처리.
+    """
+    scores = result.get("overall_scores")
+    if isinstance(scores, dict):
+        for key, value in list(scores.items()):
+            if isinstance(value, (int, float)):
+                scores[key] = round(value)
+    for word in result.get("words_detail") or []:
+        if isinstance(word, dict) and isinstance(word.get("accuracy_score"), (int, float)):
+            word["accuracy_score"] = round(word["accuracy_score"])
+
+
 # ==========================================
 # 🚀 API 엔드포인트(라우터) 정의
 # ==========================================
@@ -483,13 +499,16 @@ async def evaluate_pronunciation(
             audio_path_for_evaluation = wav_file_path
 
         # Azure 평가 모듈 호출
-        result = azure_evaluator.evaluate_audio(audio_path_for_evaluation, text_to_evaluate)
+        result = await run_in_threadpool(azure_evaluator.evaluate_audio, audio_path_for_evaluation, text_to_evaluate)
 
         # 다른 엔드포인트(/api/script/*)와 동일하게, 실패는 200이 아닌 502로 알린다.
         if result.get("status") != "success":
             raise HTTPException(status_code=502, detail=result.get("message", "발음 평가에 실패했습니다."))
 
-        scores = result.get("scores", {})
+        # 점수는 백엔드에서 정수(1점 단위, 0~100)로 확정해서 내려준다. 프론트는 이 숫자를 그대로 표시만 한다.
+        # (Azure는 소수 점수를 주고, evaluate_audio는 overall_scores 키로 반환한다.)
+        _round_scores_in_place(result)
+        scores = result.get("overall_scores", {})
         evaluation = models.PronunciationEvaluation(
             project_id=project.id,
             accuracy_score=scores.get("accuracy"),

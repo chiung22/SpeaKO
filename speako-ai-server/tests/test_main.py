@@ -634,7 +634,7 @@ def test_evaluation_audio_converts_mp3_before_evaluating(monkeypatch, db_session
         evaluated_paths.append(audio_file_path)
         return {
             "status": "success",
-            "scores": {"accuracy": 90.0, "fluency": 90.0, "completeness": 90.0, "pronunciation_score": 90.0},
+            "overall_scores": {"accuracy": 90.0, "fluency": 90.0, "completeness": 90.0, "pronunciation_score": 90.0},
             "words_detail": [],
         }
 
@@ -704,10 +704,11 @@ def test_evaluation_audio_returns_502_on_failure_and_does_not_save(monkeypatch, 
 
 def test_evaluation_audio_saves_history_on_success(monkeypatch, db_session_factory):
     project_id = _create_project(db_session_factory, [(1, "내용")], script_map={1: "테스트 문장입니다."})
+    # Azure는 소수 점수를 overall_scores 키로 준다. 백엔드가 1점 단위(정수, 0~100)로 반올림해야 한다.
     fake_result = {
         "status": "success",
-        "scores": {"accuracy": 90.0, "fluency": 85.0, "completeness": 80.0, "pronunciation_score": 88.0},
-        "words_detail": [{"word": "테스트", "accuracy_score": 90.0, "error_type": "None"}],
+        "overall_scores": {"accuracy": 90.4, "fluency": 85.6, "completeness": 80.0, "pronunciation_score": 88.7},
+        "words_detail": [{"word": "테스트", "accuracy_score": 72.7, "error_type": "None"}],
     }
     monkeypatch.setattr(main.azure_evaluator, "evaluate_audio", lambda audio_file_path, reference_text: fake_result)
 
@@ -718,13 +719,21 @@ def test_evaluation_audio_saves_history_on_success(monkeypatch, db_session_facto
         files={"audio_file": ("clip.wav", fake_file, "audio/wav")},
     )
     assert response.status_code == 200
-    assert response.json()["evaluation_id"]
+    body = response.json()
+    assert body["evaluation_id"]
+
+    # 응답 점수는 전부 정수(1점 단위)여야 한다. 프론트는 그대로 표시만 한다.
+    scores = body["overall_scores"]
+    assert scores == {"accuracy": 90, "fluency": 86, "completeness": 80, "pronunciation_score": 89}
+    assert all(isinstance(v, int) for v in scores.values())
+    assert body["words_detail"][0]["accuracy_score"] == 73
 
     db = db_session_factory()
     try:
         project = db.get(models.Project, project_id)
         assert len(project.evaluations) == 1
-        assert project.evaluations[0].accuracy_score == 90.0
+        # DB에도 정수로 저장(키 불일치 버그 회귀 방지 — 예전엔 overall_scores를 못 읽어 None 저장됐음)
+        assert project.evaluations[0].accuracy_score == 90
     finally:
         db.close()
 
