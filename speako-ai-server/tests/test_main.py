@@ -305,7 +305,23 @@ def test_create_project_rejects_oversized_file(monkeypatch):
     assert response.status_code == 413
 
 
+def _generate_full_and_wait(payload):
+    """비동기 대본 생성: 접수번호(job_id)를 받고 완료될 때까지 상태를 폴링해 최종 job 응답을 돌려준다.
+    (테스트에서는 작업이 인라인으로 즉시 실행되므로 사실상 한 번의 조회로 끝난다.)"""
+    start = client.post("/api/script/full", json=payload)
+    assert start.status_code == 202, start.text
+    job_id = start.json()["job_id"]
+    for _ in range(50):
+        res = client.get(f"/api/script/jobs/{job_id}")
+        assert res.status_code == 200
+        body = res.json()
+        if body["status"] != "processing":
+            return body
+    raise AssertionError("작업이 완료되지 않았습니다(폴링 초과).")
+
+
 def test_script_full_requires_existing_project():
+    # 프로젝트 존재 확인은 job을 만들기 전에 하므로 POST가 곧바로 404를 낸다.
     response = client.post(
         "/api/script/full",
         json={"project_id": 9999, "presentation_time": 1, "style": "격식체"},
@@ -313,16 +329,36 @@ def test_script_full_requires_existing_project():
     assert response.status_code == 404
 
 
-def test_script_full_fails_without_api_key(monkeypatch, db_session_factory):
-    project_id = _create_project(db_session_factory, [(1, "테스트 슬라이드 내용")])
-    # 키가 없으면 use_fallback=True가 되어 네트워크 호출 없이 None을 반환하고, 서버는 502로 알린다.
-    # (실제 네트워크를 때리지 않으므로 CI/오프라인에서도 결정적으로 동작한다)
-    monkeypatch.setattr(main.full_generator, "use_fallback", True)
+def test_script_full_returns_job_id_immediately(monkeypatch, db_session_factory):
+    """생성 요청은 접수번호(job_id)를 즉시 202로 돌려준다(요청을 붙잡지 않는다)."""
+    project_id = _create_project(db_session_factory, [(1, "내용")])
+    monkeypatch.setattr(main.full_generator, "use_fallback", False)
+    monkeypatch.setattr(full_gen_module.requests, "post",
+                        lambda *a, **k: _FakeResponse({"result": {"message": {"content": "한 문장 대본입니다."}}}))
+
     response = client.post(
         "/api/script/full",
         json={"project_id": project_id, "presentation_time": 1, "style": "격식체"},
     )
-    assert response.status_code == 502
+    assert response.status_code == 202
+    body = response.json()
+    assert body["job_id"]
+    assert body["status"] == "processing"
+
+
+def test_script_job_404_for_unknown_id():
+    assert client.get("/api/script/jobs/does-not-exist").status_code == 404
+
+
+def test_script_full_fails_without_api_key(monkeypatch, db_session_factory):
+    project_id = _create_project(db_session_factory, [(1, "테스트 슬라이드 내용")])
+    # 키가 없으면 use_fallback=True가 되어 네트워크 호출 없이 None을 반환한다.
+    # 이제 생성은 백그라운드 작업이므로, 접수는 202로 받고 작업 상태가 'failed'로 끝나야 한다.
+    # (실제 네트워크를 때리지 않으므로 CI/오프라인에서도 결정적으로 동작한다)
+    monkeypatch.setattr(main.full_generator, "use_fallback", True)
+    body = _generate_full_and_wait({"project_id": project_id, "presentation_time": 1, "style": "격식체"})
+    assert body["status"] == "failed"
+    assert body["error"]
 
 
 def test_script_full_parses_real_world_toon_variant_and_saves_to_slides(monkeypatch, db_session_factory):
@@ -342,12 +378,9 @@ def test_script_full_parses_real_world_toon_variant_and_saves_to_slides(monkeypa
     monkeypatch.setattr(main.full_generator, "use_fallback", False)
     monkeypatch.setattr(full_gen_module.requests, "post", lambda *a, **k: _FakeResponse(fake_payload))
 
-    response = client.post(
-        "/api/script/full",
-        json={"project_id": project_id, "presentation_time": 1, "style": "격식체"},
-    )
-    assert response.status_code == 200
-    slides = response.json()["data"]["slides"]
+    body = _generate_full_and_wait({"project_id": project_id, "presentation_time": 1, "style": "격식체"})
+    assert body["status"] == "completed"
+    slides = body["data"]["slides"]
     assert [s["slide_number"] for s in slides] == ["1", "2"]
     assert "메타버스의 개념" in slides[0]["script"]
 
@@ -376,11 +409,8 @@ def test_script_full_creates_new_slides_when_model_splits_more_than_source(monke
     monkeypatch.setattr(main.full_generator, "use_fallback", False)
     monkeypatch.setattr(full_gen_module.requests, "post", lambda *a, **k: _FakeResponse(fake_payload))
 
-    response = client.post(
-        "/api/script/full",
-        json={"project_id": project_id, "presentation_time": 3, "style": "편안한 말투"},
-    )
-    assert response.status_code == 200
+    body = _generate_full_and_wait({"project_id": project_id, "presentation_time": 3, "style": "편안한 말투"})
+    assert body["status"] == "completed"
 
     db = db_session_factory()
     try:

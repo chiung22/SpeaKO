@@ -6,12 +6,13 @@ if sys.stdout.encoding.lower() != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
 
-from fastapi import FastAPI, APIRouter, UploadFile, File, Form, Header, HTTPException, Depends
+from fastapi import FastAPI, APIRouter, UploadFile, File, Form, Header, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from typing import Literal, Optional
+from concurrent.futures import ThreadPoolExecutor
 import uvicorn
 import os
 import re
@@ -32,8 +33,20 @@ from utils import audio_converter
 from utils.text_heuristics import extract_frequent_terms
 from utils.stdict_client import StdictClient
 from utils.hangul_phonology import has_liaison_pattern
-from db.database import get_db, init_db
+from db.database import get_db, init_db, SessionLocal
 from db import models
+from utils import job_store
+
+# 대본 생성은 20~30초 걸리는 무거운 작업이라, 요청을 붙잡고 기다리면 타임아웃에 끊길 수 있다.
+# 그래서 접수번호(job_id)를 즉시 돌려주고 실제 생성은 백그라운드 스레드에서 돌린다.
+# - job_executor: 백그라운드 작업을 돌리는 스레드풀(동시 실행 개수 상한).
+# - job_session_factory: 백그라운드 작업은 요청 수명과 분리되므로 자체 DB 세션을 열어야 한다.
+#   (요청에서 받은 세션은 응답과 함께 닫힌다.) 테스트에서 인메모리 DB로 갈아끼울 수 있게 모듈 변수로 둔다.
+job_executor = ThreadPoolExecutor(
+    max_workers=max(1, int(os.getenv("SCRIPT_JOB_CONCURRENCY", "4"))),
+    thread_name_prefix="script-job",
+)
+job_session_factory = SessionLocal
 
 # 2. FastAPI 앱 인스턴스 생성
 app = FastAPI(
@@ -347,60 +360,102 @@ async def create_project(
         ),
     )
 
-@api.post("/api/script/full")
+def _run_full_script_job(job_id, project_id, ppt_text, presentation_time, style, extra_requirement, audience, topic):
+    """[백그라운드] 실제 대본 생성 + DB 저장. 요청과 분리된 자체 세션을 열고, 끝나면 job_store에 결과를 기록한다.
+    예외가 나도 프로세스가 죽지 않도록 여기서 모두 잡아 '실패'로 표시한다."""
+    db = job_session_factory()
+    try:
+        result = full_generator.generate_full_script(
+            ppt_text, presentation_time, style, extra_requirement, audience, topic
+        )
+        if not result or not result.get("slides"):
+            job_store.fail_job(job_id, "대본 생성에 실패했습니다.")
+            return
+
+        project = db.get(models.Project, project_id)
+        if not project:
+            job_store.fail_job(job_id, "프로젝트를 찾을 수 없습니다.")
+            return
+
+        # PPT 기반 프로젝트는 보통 원본 슬라이드 수와 생성된 슬라이드 수가 같지만,
+        # topic/outline만으로 만든 프로젝트(원본 슬라이드 1개)는 모델이 알아서 여러 슬라이드로 쪼개 생성하기도 한다.
+        # 이 경우 기존에 없는 슬라이드 번호는 새로 만들어서(upsert) 생성 결과가 유실되지 않게 한다.
+        # 새로 만든 슬라이드에는 원본 브리프(주제/목차)를 source_content로 복사해, 재생성 시 근거가 남게 한다.
+        base_source = next((s.source_content for s in project.slides if s.source_content), "")
+        slides_by_number = {s.slide_number: s for s in project.slides}
+        for item in result["slides"]:
+            try:
+                slide_number = int(item["slide_number"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            slide = slides_by_number.get(slide_number)
+            if slide:
+                slide.script = item["script"]
+            else:
+                new_slide = models.Slide(
+                    project_id=project.id, slide_number=slide_number,
+                    source_content=base_source, script=item["script"],
+                )
+                db.add(new_slide)
+                slides_by_number[slide_number] = new_slide
+        db.commit()
+
+        job_store.complete_job(job_id, {"project_id": project_id, "data": result})
+    except Exception as e:
+        print(f"❌ 대본 생성 작업({job_id}) 처리 중 오류: {e}")
+        job_store.fail_job(job_id, "대본 생성 중 서버 오류가 발생했습니다.")
+    finally:
+        db.close()
+
+
+@api.post("/api/script/full", status_code=status.HTTP_202_ACCEPTED)
 async def create_full_script(request: FullScriptRequest, db: Session = Depends(get_db)):
-    """[대본 전체 생성 API] project_id의 슬라이드 원문을 바탕으로 대본을 생성하고, 각 슬라이드에 저장합니다."""
+    """[대본 전체 생성 시작 API] 생성은 20~30초 걸리는 무거운 작업이라 요청을 붙잡지 않는다.
+    접수번호(job_id)를 즉시 돌려주고 실제 생성은 백그라운드에서 진행하며, 프론트는
+    GET /api/script/jobs/{job_id}로 상태를 물어본다(완료되면 결과 포함)."""
     project = db.get(models.Project, request.project_id)
     if not project:
         raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다.")
     if not project.slides:
         raise HTTPException(status_code=422, detail="이 프로젝트에 추출된 슬라이드가 없습니다.")
 
-    # source_content가 None인 슬라이드(이전 라운드에 upsert로 생겨난 것)를 그대로 넣으면
-    # "Slide 2: None" 같은 문자열이 HCX에 전달되므로, None은 빈 문자열로 방어한다.
+    # 생성에 필요한 입력은 지금(요청 세션이 살아있을 때) 값으로 다 뽑아둔다.
+    # 백그라운드 작업은 이 세션을 쓰지 않고 자체 세션을 새로 연다.
+    # source_content가 None인 슬라이드(이전 라운드 upsert로 생긴 것)는 "Slide 2: None"이 되지 않게 빈 문자열로 방어.
     ppt_text = "\n".join(f"Slide {s.slide_number}: {s.source_content or ''}" for s in project.slides)
-    # 대본 생성은 슬라이드 수만큼 HCX를 호출하는 무거운 작업이다(내부에서 동시 호출로 병렬화하지만
-    # 여전히 수 초~십수 초). async 핸들러에서 동기 함수를 그냥 부르면 그동안 이벤트 루프가 막혀
-    # 다른 요청까지 멈추므로, 스레드풀로 오프로드해서 루프를 비워 둔다.
     # 발표 주제: 요청으로 넘어온 값이 있으면 우선, 없으면 프로젝트 생성 때 저장한 주제를 쓴다.
     topic = (request.topic or "").strip() or (project.topic or "")
-    result = await run_in_threadpool(
-        full_generator.generate_full_script,
-        ppt_text,
-        request.presentation_time,
-        request.style,
-        request.extra_requirement,
-        request.audience,
-        topic,
+    project_id = project.id
+
+    # 여기까지 요청 세션은 읽기만 했다. 백그라운드 작업이 자체 세션으로 DB에 쓰기 전에
+    # 이 읽기 트랜잭션을 명시적으로 닫아 읽기 락을 놓는다(운영 이점 + 테스트의 공유 커넥션 충돌 방지).
+    db.rollback()
+
+    job_id = job_store.create_job()
+    job_executor.submit(
+        _run_full_script_job,
+        job_id, project_id, ppt_text, request.presentation_time,
+        request.style, request.extra_requirement, request.audience, topic,
     )
+    return {"success": True, "job_id": job_id, "status": "processing"}
 
-    if not result or not result.get("slides"):
-        raise HTTPException(status_code=502, detail="대본 생성에 실패했습니다.")
 
-    # PPT 기반 프로젝트는 보통 원본 슬라이드 수와 생성된 슬라이드 수가 같지만,
-    # topic/outline만으로 만든 프로젝트(원본 슬라이드 1개)는 모델이 알아서 여러 슬라이드로 쪼개 생성하기도 한다.
-    # 이 경우 기존에 없는 슬라이드 번호는 새로 만들어서(upsert) 생성 결과가 유실되지 않게 한다.
-    # 새로 만든 슬라이드에는 원본 브리프(주제/목차)를 source_content로 복사해, 재생성 시 근거가 남게 한다.
-    base_source = next((s.source_content for s in project.slides if s.source_content), "")
-    slides_by_number = {s.slide_number: s for s in project.slides}
-    for item in result["slides"]:
-        try:
-            slide_number = int(item["slide_number"])
-        except (KeyError, TypeError, ValueError):
-            continue
-        slide = slides_by_number.get(slide_number)
-        if slide:
-            slide.script = item["script"]
-        else:
-            new_slide = models.Slide(
-                project_id=project.id, slide_number=slide_number,
-                source_content=base_source, script=item["script"],
-            )
-            db.add(new_slide)
-            slides_by_number[slide_number] = new_slide
-    db.commit()
+@api.get("/api/script/jobs/{job_id}")
+async def get_script_job(job_id: str):
+    """[대본 생성 상태 조회 API] 프론트가 스피너를 돌리며 1~2초마다 폴링한다.
+    status: processing(처리중) / completed(완료, data 포함) / failed(실패, error 포함)."""
+    job = job_store.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="해당 작업을 찾을 수 없습니다.")
 
-    return {"success": True, "project_id": project.id, "data": result}
+    response = {"success": True, "job_id": job_id, "status": job["status"]}
+    if job["status"] == "completed":
+        # 완료 시 응답은 기존 동기 방식과 동일한 모양({project_id, data})을 그대로 담는다.
+        response["project_id"] = job["data"]["project_id"]
+        response["data"] = job["data"]["data"]
+    elif job["status"] == "failed":
+        response["error"] = job["error"]
+    return response
 
 @api.post("/api/script/partial")
 async def create_partial_script(request: PartialScriptRequest, db: Session = Depends(get_db)):
