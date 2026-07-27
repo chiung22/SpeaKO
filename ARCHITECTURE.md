@@ -38,7 +38,7 @@ SpeaKO/
 2. 전체 대본 생성       POST /api/script/full        → FullScriptGenerator (HyperCLOVA X, TOON 포맷) → 슬라이드별로 DB 저장
 3. 부분 대본 재생성     POST /api/script/partial     → PartialScriptGenerator (HyperCLOVA X) → 해당 슬라이드 DB 갱신
 4. 발음 주의 단어 분석   POST /api/analysis/words     → (ETRI 키 있으면 ETRI, 없으면 Kiwi 로컬 분석) → G2pConverter → 카테고리 분류(장단음/연음/표기-발음불일치) → DB에 스냅샷 저장
-5. 사용자 발음 평가     POST /api/evaluation/audio   → (WAV 아니면 audio_converter로 변환) → PronunciationEvaluator (Azure Speech) → DB에 히스토리로 누적
+5. 사용자 발음 평가     POST /api/evaluation/audio   → (WAV 아니면 audio_converter로 변환) → PronunciationEvaluator (Azure Speech) → 점수를 1점 단위 정수(0~100)로 반올림 → DB에 히스토리로 누적
 6. 프로젝트 조회        GET /api/projects, /api/projects/{id} → 위에서 쌓인 슬라이드/대본/단어/평가 히스토리 조회
 ```
 
@@ -50,13 +50,16 @@ SpeaKO/
 
 2~5번 전부 1번에서 받은 `project_id`를 기준으로 이어집니다 — 대본 생성은 DB에 저장된 슬라이드 원문을 읽고,
 부분 재생성은 클라이언트가 원본 대본을 다시 보낼 필요 없이 DB에 저장된 최신 대본을 쓰고, 발음 평가는
-`reference_text`를 안 주면 DB의 대본을 기준으로 채점합니다. 2번(전체 생성)은 `style`(`"격식체"`/`"편안한 말투"`)과
-선택적 `extra_requirement`(자유 텍스트)를 받으며, 모델이 원본 슬라이드 수와 다르게(예: topic/outline 브리프 1개를
-여러 슬라이드로) 대본을 쪼개 생성하면 없는 슬라이드 번호는 새로 만들어서 저장합니다(upsert). 자세한 스키마는
-[docs/generated/db-schema.md](docs/generated/db-schema.md) 참고.
+`reference_text`를 안 주면 DB의 대본을 기준으로 채점합니다. 2번(전체 생성)은 `style`(`"격식체"`/`"편안한 말투"`),
+선택적 `extra_requirement`(자유 텍스트), 선택적 `audience`(발표 대상/청중, 예: `"교수님"`/`"면접관"`)를 받으며,
+모델이 원본 슬라이드 수와 다르게(예: topic/outline 브리프 1개를 여러 슬라이드로) 대본을 쪼개 생성하면 없는 슬라이드
+번호는 새로 만들어서 저장합니다(upsert). 3번(부분 재생성)도 동일하게 `style`·`extra_requirement`·`audience`를 받습니다.
+자세한 스키마는 [docs/generated/db-schema.md](docs/generated/db-schema.md) 참고.
 
-`style`의 어투 정의는 [clova/styles.py](speako-ai-server/src/clova/styles.py)에 한 곳으로 모아 두고, 전체 생성·부분
-재생성·고도화가 공용으로 씁니다. **"격식체"라는 단어만 프롬프트에 던지면 모델이 해요체(~이고요/~해보았고요)로
+`style`(어투)과 `audience`(대상) 지시는 [clova/styles.py](speako-ai-server/src/clova/styles.py)에 한 곳으로 모아 두고,
+전체 생성·부분 재생성·고도화가 공용으로 씁니다. `audience`는 피그마 "대상" 필드에 대응하며, 비어 있으면(선택 입력)
+특정 청중을 가정하지 말라고 지시하고, 값이 있으면 그 청중에 맞는 존대 수준·용어 난이도·강조점으로 작성하도록 프롬프트
+`[반드시 지킬 것 — 대상]`에 넣습니다. **"격식체"라는 단어만 프롬프트에 던지면 모델이 해요체(~이고요/~해보았고요)로
 흘러내려서**(ClipRoute 대본 실측), 각 스타일은 "어떤 어미를 쓰고 어떤 어미를 금지하는지"를 문장으로 못박고 프롬프트
 맨 뒤(`[반드시 지킬 것 — 말투]`)에 둡니다. 발표 오프닝/마무리 인사 처리도 여기서 위치별 지시로 관리합니다(첫 장만 인사,
 중간 장은 곧바로 본론, 마지막 장만 마무리).
