@@ -185,17 +185,19 @@ class AnalysisRequest(BaseModel):
 
 def _round_scores_in_place(result: dict):
     """
-    발음 평가 점수를 1점 단위(정수, 0~100)로 반올림한다. 프론트는 이 숫자를 그대로 표시만 하므로
-    표시 형태를 백엔드에서 확정한다. 전체 점수(overall_scores)와 단어별 정확도(words_detail)를 모두 처리.
+    발음 평가 점수를 소수 1자리(0~100)로 정리한다. 프론트는 이 숫자를 그대로 표시만 하므로
+    표시 형태를 백엔드에서 확정하는데, 0~5점 같은 거친 척도로 뭉개지 말고 소수점까지
+    자세히(예: 87.4) 내려줘서 미세한 발음 차이가 드러나게 한다.
+    전체 점수(overall_scores)와 단어별 정확도(words_detail)를 모두 처리.
     """
     scores = result.get("overall_scores")
     if isinstance(scores, dict):
         for key, value in list(scores.items()):
             if isinstance(value, (int, float)):
-                scores[key] = round(value)
+                scores[key] = round(value, 1)
     for word in result.get("words_detail") or []:
         if isinstance(word, dict) and isinstance(word.get("accuracy_score"), (int, float)):
-            word["accuracy_score"] = round(word["accuracy_score"])
+            word["accuracy_score"] = round(word["accuracy_score"], 1)
 
 
 # ==========================================
@@ -505,8 +507,8 @@ async def evaluate_pronunciation(
         if result.get("status") != "success":
             raise HTTPException(status_code=502, detail=result.get("message", "발음 평가에 실패했습니다."))
 
-        # 점수는 백엔드에서 정수(1점 단위, 0~100)로 확정해서 내려준다. 프론트는 이 숫자를 그대로 표시만 한다.
-        # (Azure는 소수 점수를 주고, evaluate_audio는 overall_scores 키로 반환한다.)
+        # 점수는 백엔드에서 소수 1자리(0~100)로 정리해서 내려준다. 프론트는 이 숫자를 그대로 표시만 한다.
+        # (0~5점으로 뭉개지 않고 소수점까지 자세히. Azure는 소수 점수를 주고, evaluate_audio는 overall_scores 키로 반환한다.)
         _round_scores_in_place(result)
         scores = result.get("overall_scores", {})
         evaluation = models.PronunciationEvaluation(

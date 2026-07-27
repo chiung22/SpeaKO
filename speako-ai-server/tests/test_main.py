@@ -704,11 +704,12 @@ def test_evaluation_audio_returns_502_on_failure_and_does_not_save(monkeypatch, 
 
 def test_evaluation_audio_saves_history_on_success(monkeypatch, db_session_factory):
     project_id = _create_project(db_session_factory, [(1, "내용")], script_map={1: "테스트 문장입니다."})
-    # Azure는 소수 점수를 overall_scores 키로 준다. 백엔드가 1점 단위(정수, 0~100)로 반올림해야 한다.
+    # Azure는 소수 점수를 overall_scores 키로 준다. 백엔드는 0~5점으로 뭉개지 말고
+    # 소수 1자리(0~100)까지 자세히 내려줘야 한다(미세한 발음 차이가 드러나게).
     fake_result = {
         "status": "success",
-        "overall_scores": {"accuracy": 90.4, "fluency": 85.6, "completeness": 80.0, "pronunciation_score": 88.7},
-        "words_detail": [{"word": "테스트", "accuracy_score": 72.7, "error_type": "None"}],
+        "overall_scores": {"accuracy": 90.44, "fluency": 85.66, "completeness": 80.0, "pronunciation_score": 88.75},
+        "words_detail": [{"word": "테스트", "accuracy_score": 72.73, "error_type": "None"}],
     }
     monkeypatch.setattr(main.azure_evaluator, "evaluate_audio", lambda audio_file_path, reference_text: fake_result)
 
@@ -722,18 +723,17 @@ def test_evaluation_audio_saves_history_on_success(monkeypatch, db_session_facto
     body = response.json()
     assert body["evaluation_id"]
 
-    # 응답 점수는 전부 정수(1점 단위)여야 한다. 프론트는 그대로 표시만 한다.
+    # 응답 점수는 소수 1자리로 자세히 내려줘야 한다(0~5점으로 압축 금지). 프론트는 그대로 표시만 한다.
     scores = body["overall_scores"]
-    assert scores == {"accuracy": 90, "fluency": 86, "completeness": 80, "pronunciation_score": 89}
-    assert all(isinstance(v, int) for v in scores.values())
-    assert body["words_detail"][0]["accuracy_score"] == 73
+    assert scores == {"accuracy": 90.4, "fluency": 85.7, "completeness": 80.0, "pronunciation_score": 88.8}
+    assert body["words_detail"][0]["accuracy_score"] == 72.7
 
     db = db_session_factory()
     try:
         project = db.get(models.Project, project_id)
         assert len(project.evaluations) == 1
-        # DB에도 정수로 저장(키 불일치 버그 회귀 방지 — 예전엔 overall_scores를 못 읽어 None 저장됐음)
-        assert project.evaluations[0].accuracy_score == 90
+        # DB에도 소수점 그대로 저장(키 불일치 버그 회귀 방지 — 예전엔 overall_scores를 못 읽어 None 저장됐음)
+        assert project.evaluations[0].accuracy_score == 90.4
     finally:
         db.close()
 
