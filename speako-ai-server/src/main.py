@@ -633,6 +633,32 @@ async def list_projects(db: Session = Depends(get_db)):
         ],
     }
 
+@api.get("/api/evaluations")
+async def list_evaluations(db: Session = Depends(get_db)):
+    """[발표 코칭 내역 API] 프로젝트 구분 없이 지난 발음 평가 결과를 최신순으로 나열한다.
+    마이페이지 '발표 코칭 내역' 화면이 프로젝트를 하나씩 열어보지 않고 한 번에 보도록."""
+    evaluations = (
+        db.query(models.PronunciationEvaluation)
+        .order_by(models.PronunciationEvaluation.created_at.desc())
+        .all()
+    )
+    return {
+        "success": True,
+        "data": [
+            {
+                "id": e.id,
+                "project_id": e.project_id,
+                "project_name": e.project.name if e.project else None,
+                "accuracy_score": e.accuracy_score,
+                "fluency_score": e.fluency_score,
+                "completeness_score": e.completeness_score,
+                "pronunciation_score": e.pronunciation_score,
+                "created_at": e.created_at.isoformat(),
+            }
+            for e in evaluations
+        ],
+    }
+
 @api.get("/api/projects/{project_id}")
 async def get_project(project_id: int, db: Session = Depends(get_db)):
     """[프로젝트 상세 조회 API] 슬라이드별 대본, 발음 주의 단어, 평가 히스토리를 함께 반환합니다."""
@@ -667,6 +693,18 @@ async def get_project(project_id: int, db: Session = Depends(get_db)):
             ],
         },
     }
+
+@api.delete("/api/projects/{project_id}")
+async def delete_project(project_id: int, db: Session = Depends(get_db)):
+    """[프로젝트(기록) 삭제 API] 마이페이지에서 지난 기록을 지운다. 슬라이드·발음 주의 단어·평가 이력은
+    관계 cascade로 함께 삭제된다."""
+    project = db.get(models.Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다.")
+
+    db.delete(project)
+    db.commit()
+    return {"success": True, "deleted_project_id": project_id}
 
 def _slides_payload(project: "models.Project") -> list:
     """편집 API들이 공통으로 돌려주는 슬라이드 목록(번호 순)."""

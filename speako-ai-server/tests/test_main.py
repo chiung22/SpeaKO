@@ -860,3 +860,58 @@ def test_delete_slide_404_for_missing(db_session_factory):
     project_id = _create_project(db_session_factory, [(1, "A"), (2, "B")])
     assert client.delete(f"/api/projects/{project_id}/slides/99").status_code == 404
     assert client.delete("/api/projects/999999/slides/1").status_code == 404
+
+
+# ── 프로젝트(기록) 삭제 + 발표 코칭 내역 — 마이페이지 ─────────────────────────
+
+def _add_evaluation(db_session_factory, project_id, accuracy):
+    db = db_session_factory()
+    try:
+        db.add(models.PronunciationEvaluation(
+            project_id=project_id, accuracy_score=accuracy, fluency_score=90.0,
+            completeness_score=100.0, pronunciation_score=88.5, words_detail=[],
+        ))
+        db.commit()
+    finally:
+        db.close()
+
+
+def test_delete_project_removes_it_and_cascades(db_session_factory):
+    project_id = _create_project(db_session_factory, [(1, "A"), (2, "B")], script_map={1: "a", 2: "b"})
+    _add_evaluation(db_session_factory, project_id, 91.2)
+
+    response = client.delete(f"/api/projects/{project_id}")
+    assert response.status_code == 200
+    assert response.json()["deleted_project_id"] == project_id
+
+    # 프로젝트와 함께 슬라이드·평가가 cascade로 사라진다.
+    assert client.get(f"/api/projects/{project_id}").status_code == 404
+    db = db_session_factory()
+    try:
+        assert db.get(models.Project, project_id) is None
+        assert db.query(models.Slide).filter_by(project_id=project_id).count() == 0
+        assert db.query(models.PronunciationEvaluation).filter_by(project_id=project_id).count() == 0
+    finally:
+        db.close()
+
+
+def test_delete_project_404_for_missing():
+    assert client.delete("/api/projects/999999").status_code == 404
+
+
+def test_list_evaluations_returns_all_newest_first(db_session_factory):
+    p1 = _create_project(db_session_factory, [(1, "A")])
+    p2 = _create_project(db_session_factory, [(1, "B")])
+    _add_evaluation(db_session_factory, p1, 70.5)
+    _add_evaluation(db_session_factory, p2, 85.3)
+
+    response = client.get("/api/evaluations")
+    assert response.status_code == 200
+    data = response.json()["data"]
+    # 두 프로젝트의 평가가 프로젝트 구분 없이 한 목록으로 나온다.
+    project_ids = {e["project_id"] for e in data}
+    assert {p1, p2} <= project_ids
+    # 각 항목은 어느 프로젝트인지(project_name)와 점수를 포함한다.
+    sample = next(e for e in data if e["project_id"] == p2)
+    assert sample["project_name"] == "테스트 프로젝트"
+    assert sample["accuracy_score"] == 85.3
