@@ -61,6 +61,10 @@ class PronunciationEvaluation(Base):
     completeness_score = Column(Float, nullable=True)
     pronunciation_score = Column(Float, nullable=True)
     words_detail = Column(JSON, nullable=True)
+    # 평가 기준으로 쓴 원본 대본과, Azure가 실제로 인식한 텍스트. 결과 화면에서 둘을 나란히 놓고
+    # 어디를 다르게 읽었는지 비교한다(피그마 Feedback Page: 원본 텍스트 ↔ 인식 텍스트).
+    reference_text = Column(Text, nullable=True)
+    recognized_text = Column(Text, nullable=True)
     # AI 코칭 피드백(총평/잘한 점/개선할 점/연습 팁). 평가 직후엔 비어 있고, 피드백 생성 API를 부르면 채워진다.
     feedback = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=_utcnow, nullable=False)

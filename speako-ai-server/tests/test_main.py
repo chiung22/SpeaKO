@@ -1032,3 +1032,34 @@ def test_cors_origin_list_is_configurable():
     # 비어 있으면 기본 목록으로 폴백한다.
     assert main._parse_origins("") == main.DEFAULT_ALLOWED_ORIGINS
     assert "https://speakofront.vercel.app" in main._parse_origins("")
+
+
+# ── 원본 텍스트 ↔ 인식 텍스트 (피그마 Feedback Page 좌우 비교) ──────────────────
+
+def test_evaluation_saves_and_returns_recognized_text(monkeypatch, db_session_factory):
+    """점수만으로는 어디를 잘못 읽었는지 알 수 없다. Azure가 실제로 들은 문장을 함께 저장·반환해야 한다."""
+    project_id = _create_project(db_session_factory, [(1, "내용")], script_map={1: "메타버스를 소개합니다."})
+    fake_result = {
+        "status": "success",
+        "overall_scores": {"accuracy": 90.0, "fluency": 90.0, "completeness": 90.0, "pronunciation_score": 90.0},
+        "recognized_text": "메타버스를 소개함니다",
+        "words_detail": [{"word": "메타버스를", "accuracy_score": 90.0, "error_type": "None"}],
+    }
+    monkeypatch.setattr(main.azure_evaluator, "evaluate_audio", lambda audio_file_path, reference_text: fake_result)
+
+    response = client.post(
+        "/api/evaluation/audio",
+        data={"project_id": str(project_id)},
+        files={"audio_file": ("clip.wav", io.BytesIO(b"RIFF....WAVEfmt "), "audio/wav")},
+    )
+    assert response.status_code == 200
+    assert response.json()["recognized_text"] == "메타버스를 소개함니다"
+
+    # 조회 API에서 원본 대본과 인식 텍스트를 나란히 받을 수 있어야 한다.
+    detail = client.get(f"/api/projects/{project_id}").json()["data"]["evaluations"][0]
+    assert detail["recognized_text"] == "메타버스를 소개함니다"
+    assert detail["reference_text"] == "Slide 1: 메타버스를 소개합니다."
+
+    listed = client.get("/api/evaluations").json()["data"][0]
+    assert listed["recognized_text"] == "메타버스를 소개함니다"
+    assert listed["reference_text"]

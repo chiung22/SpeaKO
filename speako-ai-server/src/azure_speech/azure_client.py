@@ -72,11 +72,15 @@ class PronunciationEvaluator:
 
             words_data = []
             segment_scores = []
+            # Azure가 실제로 "들은" 문장. 결과 화면에서 원본 대본과 나란히 놓고 비교하는 데 쓴다
+            # (피그마 Feedback Page: 원본 텍스트 ↔ 인식 텍스트). 점수만으로는 어디를 잘못 읽었는지 알 수 없다.
+            recognized_segments = []
             done = threading.Event()
             cancel_messages = []
 
             def on_recognized(evt):
                 if evt.result.reason == speechsdk.ResultReason.RecognizedSpeech and evt.result.text:
+                    recognized_segments.append(evt.result.text)
                     pron_result = speechsdk.PronunciationAssessmentResult(evt.result)
                     for word in pron_result.words:
                         words_data.append({
@@ -133,6 +137,7 @@ class PronunciationEvaluator:
                     "completeness": weighted_avg("completeness"),
                     "pronunciation_score": weighted_avg("pronunciation_score")
                 },
+                "recognized_text": " ".join(recognized_segments).strip(),
                 "words_detail": words_data
             }
 
@@ -153,6 +158,7 @@ class PronunciationEvaluator:
                 "completeness": 100.0,
                 "pronunciation_score": 88.5
             },
+            "recognized_text": "메타버스와 인프라 구축의 특징을 살펴봅시다.",
             "words_detail": [
                 {"word": "메타버스와", "accuracy_score": 95.0, "error_type": "None"},
                 {"word": "인프라", "accuracy_score": 98.0, "error_type": "None"},
