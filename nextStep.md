@@ -2,9 +2,54 @@
 
 API 키(ETRI/Azure/Clova Voice) 발급 대기 중 진행 가능한 작업들을 정리합니다. "정리하자"라고 말하면 이 시점까지 작업을 PR/머지하고 이 파일을 최신 상태로 정리합니다.
 
+---
+
+# 🔖 작업 재개 지점 (2026-08-04 기준)
+
+> **대화 컨텍스트가 비워진 뒤 이어서 작업할 때 여기부터 읽으세요.** 아래 "다음에 할 일"의 1번부터 그대로 진행하면 됩니다.
+
+## 지금 상태
+
+| 항목 | 값 |
+|---|---|
+| 작업 디렉터리 | `c:\Users\송치웅\Desktop\Project\SpeaKO` (AI 서버는 `speako-ai-server/`) |
+| 브랜치 | `main` (워킹트리 깨끗함, 로컬 브랜치 main 하나) |
+| 최신 커밋 | `ac8754e` (PR #18 머지) |
+| 테스트 | **149건 통과** |
+| 엔드포인트 | 15개 (`src/main.py`) |
+
+**테스트 실행법** — 반드시 venv 파이썬을 쓸 것. 시스템 파이썬엔 pytest가 없습니다:
+```
+cd speako-ai-server && ./venv/Scripts/python.exe -m pytest tests/ -q
+```
+
+## 다음에 할 일 (우선순위 순)
+
+배포하면 터지지만 로컬에선 안 터지는 것들부터. 전부 [tech-debt-tracker.md](docs/exec-plans/tech-debt-tracker.md) 표에 근거가 있습니다.
+
+1. **입력 길이 상한 추가** — `main.py`의 `script_text`/`topic`/`outline`/`extra_requirement`에 Pydantic `Field(max_length=...)`가 없어, 호출자가 유료 API(HCX/Azure) 비용을 무제한으로 유발할 수 있음.
+2. **블로킹 I/O 오프로드 마무리** — `/api/script/full`만 `run_in_threadpool`로 처리됨. `/api/evaluation/audio`(ffmpeg `subprocess.run` + Azure `done.wait`), `/api/analysis/words`(stdict HTTP)는 아직 `async def` 안에서 동기 호출 중 → 한 요청이 이벤트루프를 잡으면 다른 요청이 멈춤.
+3. **업로드 본문 크기 상한** — `_save_upload_with_limit`는 413을 내지만, 그 시점엔 이미 multipart 전체가 파싱된 뒤. ASGI 미들웨어 또는 프록시 레벨 차단 필요.
+4. **레이트 리밋** (slowapi 등).
+5. **`job_store` 외부화** — 지금은 프로세스 메모리라 워커 2개 이상이면 폴링이 404. 단일 워커 전제로 배포하거나 Redis/DB로 옮겨야 함.
+
+## 건드리지 말 것 / 대기 중
+
+- **TTS(Clova Voice) 연결** — 사용자가 8/11 주로 미뤘음. 지시 전까지 착수 금지.
+- **`speakO-Back` 저장소 push 금지** — 명시적 지시 있을 때까지 `chiung22/SpeaKO`에만 반영.
+- 실제 사람 목소리 녹음 검증 / PM의 AI 화면 Figma — 둘 다 사용자·외부 대기.
+
+## 이번 정리 라운드(8/04)에 한 것
+
+- Figma export 폴더 3개(07-21 / 07-27 / 08-04)를 `docs/figma/UMC 10th_SpeaKO (1)/` 하나로 통합. 겹치면 최신본 우선, 고유 파일 전부 이관 후 나머지 삭제(유실 0 확인). 워킹트리 미커밋 162건 → 0건. (PR #17)
+- [tech-debt-tracker.md](docs/exec-plans/tech-debt-tracker.md)를 실제 코드와 동기화 — 이미 고친 11건이 부채 표에 남아 있어 잔여 작업 판단이 불가능했음. 새 부채 1건(`job_store` 메모리) 추가. (PR #18)
+- 머지 완료된 로컬 브랜치 6개 삭제. **원격 머지 완료 브랜치 8개는 아직 남아 있음** — 사용자에게 삭제 여부 물어본 상태.
+
+---
+
 ## ✅ 현재 상태 (2026-08-04) — 시연 8/21, 개발 완료 목표 8/19
 
-**엔드포인트 15개, pytest 145건 통과.** TTS(Clova Voice) 연결을 제외하면 피그마가 요구한 AI 서버 기능은 전부 구현됨.
+**엔드포인트 15개, pytest 149건 통과.** TTS(Clova Voice) 연결을 제외하면 피그마가 요구한 AI 서버 기능은 전부 구현됨.
 
 ### 이 라운드에 들어간 것 (PR #10~#15)
 - **대상(청중)·발표 주제**를 생성 프롬프트에 주입. 파일 업로드 시 사용자가 입력한 주제를 자동 감지값보다 우선 저장.
