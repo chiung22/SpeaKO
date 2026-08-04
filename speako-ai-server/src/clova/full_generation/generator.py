@@ -150,7 +150,9 @@ class FullScriptGenerator:
             return None
 
         all_slides.sort(key=lambda s: int(s["slide_number"]))
-        return {"slides": all_slides}
+        # 끝내 못 만든 슬라이드는 콘솔에만 찍고 넘어가면 프론트가 "왜 이 장만 비어 있지?"를 알 수 없다.
+        # 결과에 실어 보내서 화면에서 "이 슬라이드는 다시 생성해 주세요"를 안내할 수 있게 한다.
+        return {"slides": all_slides, "missing_slide_numbers": missing}
 
     def _request_one_slide(self, slide_number, block, position, presentation_time, style, extra_requirement, audience="", topic="", is_last=True):
         """

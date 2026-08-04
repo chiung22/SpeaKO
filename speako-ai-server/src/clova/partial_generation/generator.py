@@ -21,7 +21,7 @@ class PartialScriptGenerator:
         if self.use_fallback:
             print("⚠️ [경고] HCX_API_KEY가 설정되지 않았습니다. 부분 재생성은 안전 모드(None 반환)로 동작합니다.")
 
-    def generate_partial_script(self, original_script, target_slide, style, extra_requirement="", audience=""):
+    def generate_partial_script(self, original_script, target_slide, style, extra_requirement="", audience="", source_content=""):
         if self.use_fallback:
             return None
         headers = {
@@ -52,11 +52,19 @@ class PartialScriptGenerator:
         if extra_requirement and extra_requirement.strip():
             requirement_text += f"\n추가 요구사항: {extra_requirement.strip()}"
 
+        # 대상 슬라이드의 원문이 있으면 먼저 보여준다. 없으면 모델은 이 장이 무슨 내용인지 모른 채
+        # 앞뒤 대본만 보고 지어내게 된다(특히 아직 대본이 없는 슬라이드를 다시 만들 때).
+        source_block = (source_content or "").strip()
+        source_section = f"""
+        [대상 슬라이드 원문 — 이 내용을 근거로 쓰세요]
+        {source_block}
+        """ if source_block else ""
+
         user_prompt = f"""
         [대상 슬라이드 번호]
         Slide {target_slide}
-
-        [기존 대본 내용]
+        {source_section}
+        [전체 대본 (앞뒤 흐름 참고용 — 다른 장 내용을 끌어오지 마세요)]
         {original_script}
 
         [재생성 요구사항]

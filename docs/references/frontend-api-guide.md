@@ -83,13 +83,15 @@ DELETE /api/projects/{id}     기록 삭제
 
 // 완료
 { "success": true, "job_id": "abc123", "status": "completed", "project_id": 12,
-  "data": { "slides": [{"slide_number": "1", "script": "안녕하십니까..."}] } }
+  "data": { "slides": [{"slide_number": "1", "script": "안녕하십니까..."}],
+            "missing_slide_numbers": [] } }
 
 // 실패
 { "success": true, "job_id": "abc123", "status": "failed", "error": "대본 생성에 실패했습니다." }
 ```
 - `status`가 `processing`이 아니면 폴링을 멈춥니다.
 - 없는 `job_id`는 `404`.
+- `data.missing_slide_numbers`에 번호가 있으면 그 슬라이드는 대본이 비어 있습니다 — "다시 생성" 안내 후 `POST /api/script/partial`로 그 장만 재생성하면 됩니다.
 - ⚠️ 작업 상태는 서버 메모리에 있습니다. **서버가 재시작되면 진행 중이던 작업은 사라지므로**, 폴링이 404를 받으면 "다시 시도"를 안내해 주세요.
 
 ---
