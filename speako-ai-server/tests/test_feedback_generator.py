@@ -134,3 +134,45 @@ def test_generate_feedback_returns_none_without_api_key():
     generator = PronunciationFeedbackGenerator()
     generator.use_fallback = True
     assert generator.generate_feedback({"accuracy": 90}, []) is None
+
+
+def test_collect_strong_words_picks_high_scores():
+    """칭찬에도 근거가 필요하다 — 안 주면 모델이 대본에서 아무 단어나 골라 칭찬한다(실측)."""
+    from clova.feedback.generator import collect_strong_words
+
+    words = [
+        {"word": "평가", "accuracy_score": 98.0, "error_type": "None"},
+        {"word": "발음", "accuracy_score": 92.5, "error_type": "None"},
+        {"word": "발전", "accuracy_score": 52.0, "error_type": "Mispronunciation"},
+        {"word": "안읽음", "accuracy_score": 100.0, "error_type": "Omission"},
+    ]
+    strong = collect_strong_words(words)
+    # 점수 높은 순, 틀린 단어와 안 읽은 단어는 제외.
+    assert [w["word"] for w in strong] == ["평가", "발음"]
+
+
+def test_strong_words_are_sent_as_praise_evidence(monkeypatch):
+    import clova.feedback.generator as feedback_module
+
+    sent = {}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        sent["prompt"] = json["messages"][-1]["content"][0]["text"]
+        return _FakeResponse("[총평]\n좋습니다.")
+
+    monkeypatch.setattr(feedback_module.requests, "post", fake_post)
+
+    generator = PronunciationFeedbackGenerator()
+    generator.api_key = "test-key"
+    generator.use_fallback = False
+    generator.generate_feedback(
+        {"accuracy": 90.0},
+        [{"word": "발전", "accuracy_score": 52.0, "error_type": "Mispronunciation"}],
+        "Slide 1: 인공지능 서비스를 소개합니다.",
+        [{"word": "평가", "accuracy_score": 98.0}],
+    )
+
+    assert "잘 발음한 단어" in sent["prompt"]
+    assert "평가" in sent["prompt"]
+    # 대본 단어를 근거로 쓰지 말라는 지시가 포함돼야 한다.
+    assert "여기서 단어를 골라 평가하지 마세요" in sent["prompt"]

@@ -922,7 +922,7 @@ def test_evaluation_feedback_generates_and_saves(monkeypatch, db_session_factory
 
     monkeypatch.setattr(
         main.feedback_generator, "generate_feedback",
-        lambda overall_scores, weak_words, script_excerpt="": {
+        lambda overall_scores, weak_words, script_excerpt="", strong_words=None: {
             "summary": "전반적으로 또렷합니다.", "strengths": ["속도가 일정합니다."],
             "improvements": ["받침을 끝까지 발음하세요."], "practice_tips": ["천천히 3번 읽어보세요."],
         },
@@ -948,7 +948,7 @@ def test_evaluation_feedback_is_cached_and_not_regenerated(monkeypatch, db_sessi
 
     calls = []
 
-    def fake_generate(overall_scores, weak_words, script_excerpt=""):
+    def fake_generate(overall_scores, weak_words, script_excerpt="", strong_words=None):
         calls.append(1)
         return {"summary": "첫 생성", "strengths": [], "improvements": [], "practice_tips": []}
 
@@ -966,7 +966,7 @@ def test_evaluation_feedback_502_when_generation_fails(monkeypatch, db_session_f
     project_id = _create_project(db_session_factory, [(1, "내용")])
     evaluation_id = _create_evaluation(db_session_factory, project_id)
     monkeypatch.setattr(main.feedback_generator, "generate_feedback",
-                        lambda overall_scores, weak_words, script_excerpt="": None)
+                        lambda overall_scores, weak_words, script_excerpt="", strong_words=None: None)
 
     assert client.post(f"/api/evaluation/{evaluation_id}/feedback").status_code == 502
 
@@ -991,3 +991,44 @@ def test_list_evaluations_returns_all_newest_first(db_session_factory):
     sample = next(e for e in data if e["project_id"] == p2)
     assert sample["project_name"] == "테스트 프로젝트"
     assert sample["accuracy_score"] == 85.3
+
+
+# ── CORS (배포된 프론트엔드가 브라우저에서 직접 호출할 수 있어야 함) ──────────────
+
+def test_cors_allows_deployed_frontend_origin():
+    """localhost만 허용하면 배포된 프론트(vercel)에서 호출 시 브라우저가 전부 차단한다."""
+    response = client.options(
+        "/api/projects",
+        headers={
+            "Origin": "https://speakofront.vercel.app",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+    assert response.status_code in (200, 204)
+    assert response.headers.get("access-control-allow-origin") == "https://speakofront.vercel.app"
+
+
+def test_cors_allows_vercel_preview_domains():
+    """Vercel 프리뷰는 커밋마다 도메인이 바뀌므로 정규식으로도 허용돼야 한다."""
+    origin = "https://speakofront-abc123-team.vercel.app"
+    response = client.options(
+        "/api/projects",
+        headers={"Origin": origin, "Access-Control-Request-Method": "GET"},
+    )
+    assert response.headers.get("access-control-allow-origin") == origin
+
+
+def test_cors_still_allows_localhost_for_dev():
+    response = client.options(
+        "/api/projects",
+        headers={"Origin": "http://localhost:3000", "Access-Control-Request-Method": "GET"},
+    )
+    assert response.headers.get("access-control-allow-origin") == "http://localhost:3000"
+
+
+def test_cors_origin_list_is_configurable():
+    """환경변수로 배포 도메인을 바꿀 수 있어야 한다(도메인 변경 시 코드 수정 없이)."""
+    assert main._parse_origins("https://a.com, https://b.com/") == ["https://a.com", "https://b.com"]
+    # 비어 있으면 기본 목록으로 폴백한다.
+    assert main._parse_origins("") == main.DEFAULT_ALLOWED_ORIGINS
+    assert "https://speakofront.vercel.app" in main._parse_origins("")

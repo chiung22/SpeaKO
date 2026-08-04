@@ -22,7 +22,7 @@ import hmac
 # 1. 분리해둔 AI 클라이언트 모듈들 임포트
 from clova.full_generation.generator import FullScriptGenerator
 from clova.partial_generation.generator import PartialScriptGenerator
-from clova.feedback.generator import PronunciationFeedbackGenerator, collect_weak_words
+from clova.feedback.generator import PronunciationFeedbackGenerator, collect_weak_words, collect_strong_words
 from etri.etri_client import EtriLanguageAnalyzer
 from nlp.kiwi_analyzer import KiwiAnalyzer
 from g2p.g2p_client import G2pConverter
@@ -57,13 +57,29 @@ app = FastAPI(
 )
 
 # 3. CORS(교차 출처 리소스 공유) 설정
-origins = [
-    "http://localhost:3000",
+# 배포된 프론트엔드(Vercel)에서 브라우저가 직접 이 API를 부르면, 허용 목록에 없는 출처는
+# 브라우저가 응답을 통째로 차단한다. localhost만 하드코딩해두면 배포 환경에서 전부 막히므로
+# 환경변수로 열어둔다. (쉼표로 여러 개, 예: CORS_ALLOW_ORIGINS=https://speakofront.vercel.app,https://speako.app)
+DEFAULT_ALLOWED_ORIGINS = [
+    "http://localhost:3000",   # CRA/Next 기본
+    "http://localhost:5173",   # Vite 기본
+    "https://speakofront.vercel.app",  # 배포된 프론트엔드
 ]
+
+
+def _parse_origins(raw: str):
+    """쉼표로 구분된 출처 목록을 파싱한다. 값이 없으면 기본 목록을 쓴다."""
+    parsed = [origin.strip().rstrip("/") for origin in (raw or "").split(",") if origin.strip()]
+    return parsed or list(DEFAULT_ALLOWED_ORIGINS)
+
+
+origins = _parse_origins(os.getenv("CORS_ALLOW_ORIGINS", ""))
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
+    # Vercel 프리뷰 배포는 커밋마다 도메인이 바뀌므로(<프로젝트>-<해시>-<팀>.vercel.app) 정규식으로 함께 허용한다.
+    allow_origin_regex=os.getenv("CORS_ALLOW_ORIGIN_REGEX", r"https://.*\.vercel\.app"),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -636,10 +652,12 @@ async def create_evaluation_feedback(evaluation_id: int, db: Session = Depends(g
         "pronunciation_score": evaluation.pronunciation_score,
     }
     weak_words = collect_weak_words(evaluation.words_detail)
+    # 칭찬에도 근거가 필요하다 — 안 주면 모델이 대본에서 아무 단어나 골라 "잘 발음했다"고 지어낸다.
+    strong_words = collect_strong_words(evaluation.words_detail)
     script_excerpt = _compiled_script_text(evaluation.project) if evaluation.project else ""
 
     feedback = await run_in_threadpool(
-        feedback_generator.generate_feedback, overall_scores, weak_words, script_excerpt
+        feedback_generator.generate_feedback, overall_scores, weak_words, script_excerpt, strong_words
     )
     if not feedback:
         raise HTTPException(status_code=502, detail="발음 피드백 생성에 실패했습니다.")

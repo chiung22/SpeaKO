@@ -24,6 +24,10 @@ REQUEST_TIMEOUT_SECONDS = 30
 MAX_WEAK_WORDS = 12
 # 이 점수 미만인 단어를 '약한 발음'으로 본다(Azure 0~100 기준).
 WEAK_WORD_THRESHOLD = 70
+# 이 점수 이상이면 '잘 발음한 단어'로 본다. 칭찬에도 근거가 필요하다 —
+# 근거를 안 주면 모델이 대본에서 아무 단어나 골라 "잘 발음했습니다"라고 지어낸다(실측).
+STRONG_WORD_THRESHOLD = 90
+MAX_STRONG_WORDS = 8
 
 _SECTION_KEYS = {
     "총평": "summary",
@@ -58,6 +62,20 @@ def collect_weak_words(words_detail, threshold=WEAK_WORD_THRESHOLD, limit=MAX_WE
 
     weak.sort(key=lambda w: w["accuracy_score"] if isinstance(w["accuracy_score"], (int, float)) else 0)
     return weak[:limit]
+
+
+def collect_strong_words(words_detail, threshold=STRONG_WORD_THRESHOLD, limit=MAX_STRONG_WORDS):
+    """점수가 높은 단어를 골라 점수 내림차순으로 돌려준다(칭찬의 근거로 쓴다)."""
+    strong = []
+    for word in words_detail or []:
+        if not isinstance(word, dict) or not word.get("word"):
+            continue
+        score = word.get("accuracy_score")
+        if (word.get("error_type") or "None") == "None" and isinstance(score, (int, float)) and score >= threshold:
+            strong.append({"word": word["word"], "accuracy_score": score})
+
+    strong.sort(key=lambda w: w["accuracy_score"], reverse=True)
+    return strong[:limit]
 
 
 def parse_feedback_sections(text):
@@ -112,7 +130,9 @@ class PronunciationFeedbackGenerator:
 
         [작성 규칙]
         1. 점수를 그대로 나열하지 말고, 그 점수가 무슨 의미인지 사람 말로 풀어주세요.
-        2. 지적은 반드시 근거가 되는 단어를 함께 언급하세요. 주어지지 않은 단어를 지어내지 마세요.
+        2. 지적도 칭찬도 반드시 아래에 주어진 단어 목록만 근거로 삼으세요.
+           목록에 없는 단어를 골라 "잘 발음했습니다"라고 하거나 지적하지 마세요.
+           대본은 맥락 파악용일 뿐이며, 대본에서 단어를 골라 평가하면 안 됩니다.
         3. 개선점은 "무엇을 어떻게" 하라는 행동으로 쓰세요. (예: "받침 ㄴ을 끝까지 발음하세요")
         4. 격려하되 과장하지 마세요. 점수가 낮으면 낮다고 정직하게 말하세요.
         5. 존댓말(~습니다/~하세요)로 쓰고, 각 항목은 한 문장으로 간결하게 쓰세요.
@@ -132,15 +152,17 @@ class PronunciationFeedbackGenerator:
         - (2~3개)
         """
 
-    def generate_feedback(self, overall_scores, weak_words, script_excerpt=""):
+    def generate_feedback(self, overall_scores, weak_words, script_excerpt="", strong_words=None):
         """
-        점수와 약한 단어를 근거로 코칭 피드백을 생성한다.
+        점수와 단어별 결과를 근거로 코칭 피드백을 생성한다.
         성공하면 {"summary", "strengths", "improvements", "practice_tips"} dict, 실패하면 None.
         """
         if self.use_fallback:
             return None
 
-        user_prompt = self._build_user_prompt(overall_scores or {}, weak_words or [], script_excerpt)
+        user_prompt = self._build_user_prompt(
+            overall_scores or {}, weak_words or [], script_excerpt, strong_words or []
+        )
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -177,7 +199,7 @@ class PronunciationFeedbackGenerator:
             print(f"❌ 발음 피드백 생성 API 호출 중 에러가 발생했습니다: {e}")
             return None
 
-    def _build_user_prompt(self, overall_scores, weak_words, script_excerpt):
+    def _build_user_prompt(self, overall_scores, weak_words, script_excerpt, strong_words=()):
         def score_line(label, key):
             value = overall_scores.get(key)
             return f"- {label}: {value if value is not None else '측정 안 됨'}"
@@ -194,6 +216,11 @@ class PronunciationFeedbackGenerator:
         excerpt = (script_excerpt or "").strip()
         excerpt_block = excerpt[:500] if excerpt else "제공되지 않음"
 
+        if strong_words:
+            strong_lines = "\n".join(f"- {w['word']} (정확도 {w.get('accuracy_score')})" for w in strong_words)
+        else:
+            strong_lines = "- 특별히 높은 점수를 받은 단어는 없습니다."
+
         return f"""
         [발음 평가 점수] (0~100)
         {score_line('정확도', 'accuracy')}
@@ -201,9 +228,12 @@ class PronunciationFeedbackGenerator:
         {score_line('완성도', 'completeness')}
         {score_line('종합 발음 점수', 'pronunciation_score')}
 
-        [점수가 낮았던 단어]
+        [점수가 낮았던 단어] — 개선할 점의 근거로만 쓰세요
         {weak_lines}
 
-        [발표 대본 일부 (맥락 참고용)]
+        [잘 발음한 단어] — 잘한 점의 근거로만 쓰세요
+        {strong_lines}
+
+        [발표 대본 일부 (맥락 참고용 — 여기서 단어를 골라 평가하지 마세요)]
         {excerpt_block}
         """
