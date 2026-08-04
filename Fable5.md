@@ -8,7 +8,7 @@
 
 ## 0. 이 저장소를 건드리기 전에 (체크리스트)
 
-1. **`pytest tests/ -q`를 먼저 돌려 현재 통과 개수를 확인**한다. 작업 후 이 숫자가 줄면 안 된다. (실행: `cd speako-ai-server && venv/Scripts/python.exe -m pytest tests/ -q`)
+1. **`pytest tests/ -q`를 먼저 돌려 현재 통과 개수를 확인**한다. 작업 후 이 숫자가 줄면 안 된다. (실행: `cd speako-ai-server && pytest tests/ -q`. 시스템 파이썬·venv 둘 다 의존성이 깔려 있어 어느 쪽으로 돌려도 된다. 만약 `ModuleNotFoundError`가 나면 **거기서 멈추지 말고** `pip install -r requirements-dev.txt`로 깔고 계속한다.)
 2. 외부 API(HCX/ETRI/Azure/Clova Voice/표준국어대사전)를 건드린다면 **키 없이도 동작하는 안전 모드(fallback)를 먼저 설계**한다. core-beliefs #1은 이 프로젝트의 헌법이다.
 3. 새 기능엔 **반드시 스모크 테스트를 하나 이상** 추가한다. 그 테스트는 **실제 네트워크를 때리면 안 된다**(아래 §8).
 4. 응답 형태(response shape)나 엔드포인트 경로를 바꾸면, **그걸 참조하는 모든 것**(테스트, `docs/product-specs/*`, `docs/generated/db-schema.md`, `src/_*.py` 헬퍼, `ARCHITECTURE.md`)을 같이 고친다. (§7)
@@ -134,11 +134,12 @@ core-beliefs #3(실패는 HTTP 상태코드로)을 지키되, 두 가지를 더 
 
 ## 9. 환경·플랫폼 현실을 무시하지 마라 (이 저장소는 Windows다)
 
-- **실제 사례들.** ① Windows 콘솔 기본 코드페이지(cp949)가 이모지를 인코딩 못 해 `print()`에서 서버가 부팅 중 죽었다(→ `main.py` 최상단 `sys.stdout.reconfigure(utf-8)`). ② `g2pkk`가 Windows에서 로드 실패 → 자체 fallback 사전으로 전환. ③ 오디오 변환엔 시스템에 `ffmpeg`가 깔려 있어야 함. ④ Windows에선 파일 핸들이 잡혀 있으면 `os.remove`가 실패.
+- **실제 사례들.** ① Windows 콘솔 기본 코드페이지(cp949)가 이모지를 인코딩 못 해 `print()`에서 서버가 부팅 중 죽었다(→ `main.py` 최상단 `sys.stdout.reconfigure(utf-8)`). ② `g2pkk`가 Windows에서 로드 실패 → 자체 fallback 사전으로 전환. ③ 오디오 변환엔 시스템에 `ffmpeg`가 깔려 있어야 함. ④ Windows에선 파일 핸들이 잡혀 있으면 `os.remove`가 실패. ⑤ **`requirements.txt`의 한글 주석 때문에 `pip install -r`이 죽었다** — pip은 BOM도 인코딩 선언도 없으면 파일을 `locale.getpreferredencoding()`(=cp949)로 읽는다. CI(우분투/UTF-8)에선 멀쩡했고 한국어 Windows에서만 터졌다(→ 두 requirements 파일 첫 줄에 `# -*- coding: utf-8 -*-`).
 
 **규칙:**
 - 파일 삭제, 서브프로세스, 서드파티 라이브러리 로드는 **Windows에서 다르게 동작할 수 있음**을 가정하고 방어한다.
-- 새 시스템 의존성(ffmpeg 같은 exe)이 필요하면 **사용자/서버 담당자에게 설치 가능 여부를 먼저 확인**한다(임의로 도입하지 말 것).
+- **설정·데이터 파일에 한글을 넣을 거면 그 파일을 읽는 쪽이 UTF-8을 가정하는지 확인**한다. "CI에서 통과했다"는 로컬(cp949)에서 된다는 뜻이 아니다.
+- 새 시스템 의존성(ffmpeg 같은 exe)이 필요하면 **사용자/서버 담당자에게 설치 가능 여부를 먼저 확인**한다(임의로 도입하지 말 것). 반대로 **이미 `requirements*.txt`에 적혀 있는 파이썬 패키지는 그냥 설치하고 진행한다** — "환경에 없어서 못 했다"는 이 저장소에서 유효한 변명이 아니다.
 
 ---
 

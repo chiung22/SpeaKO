@@ -125,7 +125,7 @@ TTS 합성(`ClovaVoiceClient`)은 아직 전용 라우터가 없고, `run_pipeli
 
 - **인증/인가**: 모든 엔드포인트가 무인증으로 열려 있습니다. DB에 `project_id`가 생겼지만 누구나 남의 프로젝트를 조회/수정할 수 있는 상태입니다.
 - **프론트엔드**: `origins = ["http://localhost:3000"]` 설정만 보면 Next.js/React 계열 프론트가 예정되어 있는 것으로 보이나, 아직 이 레포에는 없습니다. Figma 디자인(`docs/figma/`)은 있음 — 화면 구성과 백엔드 계약을 맞추는 데 참고.
-- **배포 파이프라인**: PR마다 `pytest`를 돌리는 CI(`.github/workflows/tests.yml`)는 있지만, Dockerfile이나 실제 배포(CD) 설정은 없습니다.
+- **배포(CD)**: `speako-ai-server/Dockerfile`은 있고, CI(`.github/workflows/tests.yml`)가 PR마다 `pytest` + **이미지 빌드·기동 스모크**까지 돌립니다. 다만 빌드한 이미지를 어디로 올려 굴릴지(레지스트리·호스팅) 정해진 게 없어 배포 자체는 수동입니다.
 - **발음 평가 결과에 AI 생성 정성 피드백 없음**: Figma "Coach View Page"/"Feedback Page"의 점수 옆 "발음 팁"/"상세 피드백"처럼, AI가 생성한 정성적 코멘트를 보여주는 부분은 아직 없습니다(`/api/evaluation/audio`는 Azure의 숫자 점수만 반환). 카테고리별 하이라이트(장단음/연음/표기-발음불일치)는 구현됨 — 위 "4번" 설명 참고. [tech-debt-tracker.md](docs/exec-plans/tech-debt-tracker.md) 참고.
 
 각 항목의 상세 논의는 [RELIABILITY.md](RELIABILITY.md), [SECURITY.md](SECURITY.md), [docs/exec-plans/tech-debt-tracker.md](docs/exec-plans/tech-debt-tracker.md)에 분산되어 있습니다.
