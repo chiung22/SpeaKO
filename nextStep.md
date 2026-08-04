@@ -50,6 +50,7 @@ cd speako-ai-server && ./venv/Scripts/python.exe -m pytest tests/ -q   # venv
   - `eunjeon`은 무관한 것으로 확인: 있으나 없으나 사전 로드에 실패해 양쪽 다 Kiwi 대체 경로를 타고, G2P 출력이 완전히 동일했음(9단어 실측).
   - `requirements*.txt` 첫 줄 `# -*- coding: utf-8 -*-`는 **지우면 안 됨**. pip 24.0의 `auto_decode`는 BOM/인코딩 선언이 없으면 로케일 인코딩으로 읽는데, 한국어 Windows(cp949)에서 한글 주석 때문에 `UnicodeDecodeError`로 죽는다 — 선언 유무로 실측 확인. CI(우분투/UTF-8)에서는 재현되지 않는다.
   - 시스템 파이썬에도 `requirements-dev.txt` 설치 완료. 위 인코딩 문제 때문에 이전 설치가 중간에 실패해 있었던 것으로 보임.
+  - **로컬과 컨테이너가 서로 다른 G2P 구현을 탄다** — 로컬(Windows)은 mecab 로드 실패로 Kiwi 대체 경로, 컨테이너는 g2pkk 그대로(부팅 로그의 "Kiwi로 대체" 경고 유무로 구분됨). 9단어 실측 결과 **출력은 완전히 동일**했고, CI docker 잡이 이 값을 고정한다. 발음기호가 배포에서만 달라지면 CI가 실패한다.
 
 ---
 
