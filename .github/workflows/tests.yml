@@ -66,6 +66,28 @@ jobs:
             exit 1
           fi
 
+      # 로컬(Windows)은 mecab 로드에 실패해 Kiwi 대체 경로를 타는데, 컨테이너는 g2pkk를
+      # 그대로 올린다(부팅 로그에 "Kiwi로 대체" 경고가 없음). 경로가 다르면 같은 단어에
+      # 다른 발음기호가 나올 수 있고, 그건 발음 코칭이 배포에서만 틀리는 것을 뜻한다.
+      # 로컬 실측값과 대조해 고정한다.
+      - name: G2P 출력이 로컬과 일치하는지 확인
+        run: |
+          docker exec speako python -c '
+          import json
+          from g2p.g2p_client import G2pConverter
+          expected = {
+              "학교": "[학꾜]", "국물": "[궁물]", "신라": "[실라]",
+              "값어치": "[갑써치]", "맑다": "[막따]", "인공지능": "[인공지능]",
+              "협력": "[혐녁]", "밟다": "[밥따]", "핥아": "[할타]",
+          }
+          got = {r["word"]: r["phoneme"] for r in G2pConverter().convert_words(list(expected))}
+          diff = {w: (expected[w], got.get(w)) for w in expected if got.get(w) != expected[w]}
+          print("컨테이너 G2P:", json.dumps(got, ensure_ascii=False))
+          if diff:
+              raise SystemExit("로컬과 불일치(기대, 실제): " + json.dumps(diff, ensure_ascii=False))
+          print("로컬 실측값과 일치")
+          '
+
       - name: Tear down
         if: always()
         run: docker rm -f speako || true
