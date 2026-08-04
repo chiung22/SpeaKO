@@ -1169,3 +1169,33 @@ def test_reference_text_wins_over_slide_number(monkeypatch, db_session_factory):
         files={"audio_file": ("clip.wav", io.BytesIO(b"RIFF"), "audio/wav")},
     )
     assert seen["reference"] == "직접 준 문장"
+
+
+def test_partial_regeneration_survives_header_only_response(monkeypatch, db_session_factory):
+    """모델이 TOON 헤더만 붙이고 본문은 평문으로 줘도 대본을 살려야 한다(실측 502 회귀 방지)."""
+    project_id = _create_project(db_session_factory, [(1, "A"), (2, "B")], script_map={1: "가", 2: "나"})
+    raw = "slides[2]{slide_number,script}: \n자 그럼 이제 발표를 시작해볼게요! 집중해 주세요."
+    monkeypatch.setattr(main.partial_generator, "use_fallback", False)
+    monkeypatch.setattr(
+        partial_gen_module.requests, "post",
+        lambda *a, **k: _FakeResponse({"result": {"message": {"content": raw}}}),
+    )
+
+    response = client.post(
+        "/api/script/partial",
+        json={"project_id": project_id, "target_slide": 2, "style": "편안한 말투"},
+    )
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["script"] == "자 그럼 이제 발표를 시작해볼게요! 집중해 주세요."
+    # 요청자가 지정한 슬라이드에 저장돼야 한다 (모델이 매긴 번호를 믿으면 안 됨).
+    assert data["slide_number"] == "2"
+
+    db = db_session_factory()
+    try:
+        project = db.get(models.Project, project_id)
+        saved = {s.slide_number: s.script for s in project.slides}
+        assert saved[2] == "자 그럼 이제 발표를 시작해볼게요! 집중해 주세요."
+        assert saved[1] == "가", "다른 슬라이드는 건드리면 안 된다"
+    finally:
+        db.close()

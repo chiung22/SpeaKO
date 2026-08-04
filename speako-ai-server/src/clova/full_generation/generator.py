@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 
 from utils.usage_tracker import log_hcx_call
-from clova.toon_parser import parse_toon_slides
+from clova.toon_parser import clean_script_text, parse_toon_slides
 from clova.styles import (
     FIRST_SLIDE_INSTRUCTION,
     LAST_SLIDE_INSTRUCTION,
@@ -47,23 +47,8 @@ def _split_slide_blocks(ppt_text):
 
 
 def _clean_single_slide_script(text):
-    """
-    한 장짜리 요청의 응답을 대본 문장만 남기고 정리한다.
-    평문으로 답하라고 했지만 모델이 습관적으로 TOON 껍데기나 "Slide 1:" 라벨을 붙이는 경우가 있다.
-    """
-    if not text:
-        return ""
-
-    script = text.strip()
-
-    # 혹시 TOON으로 답했으면 벗겨낸다.
-    parsed = parse_toon_slides(script)
-    if parsed:
-        script = " ".join(item["script"] for item in parsed)
-
-    script = re.sub(r"^\s*Slide\s*\d*\s*:\s*", "", script)
-    script = re.sub(r"\s+", " ", script).strip()
-    return script
+    """한 장짜리 응답에서 대본 문장만 남긴다. 정리 규칙은 부분 재생성과 공유한다(clova/toon_parser.py)."""
+    return clean_script_text(text)
 
 
 # 발표 중간 슬라이드에서 나오면 안 되는 마무리 인사. 프롬프트로 금지해도 모델이 종종 붙인다

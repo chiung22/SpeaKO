@@ -304,14 +304,22 @@
   ● 요청
     project_id      : 12                    (필수)
     audio_file      : 녹음 파일              (필수) .webm/.wav/.mp3/.m4a, 최대 10MB
+    slide_number    : 3                     (선택) 슬라이드별로 나눠 녹음할 때
     reference_text  : 평가 기준 텍스트        (선택)
-                      생략하면 서버에 저장된 대본 전체를 기준으로 채점
+
+    ※ 평가 기준이 되는 대본은 아래 순서로 정해집니다.
+       1) reference_text 를 주면 그것
+       2) slide_number 를 주면 그 슬라이드 대본만  <- 슬라이드별 부분 녹음
+       3) 둘 다 없으면 대본 전체
+       슬라이드 하나만 읽었는데 전체 대본을 기준으로 채점하면 완성도가 바닥으로
+       나오므로, 부분 녹음일 때는 slide_number 를 꼭 넣어주세요.
 
   ● 응답
     {
       "success": true,
       "project_id": 12,
       "evaluation_id": 5,
+      "slide_number": 3,              // 슬라이드별 녹음이면 그 번호, 전체 녹음이면 null
       "overall_scores": {
         "accuracy": 87.4,             // 정확도
         "fluency": 82.1,              // 유창성
@@ -333,6 +341,9 @@
     - 점수는 소수점 1자리(0~100)로 옵니다. 그대로 표시하면 됩니다. (0~5점 아님)
     - recognized_text 와 원본 대본을 좌우로 놓으면 "원본 <-> 인식 텍스트" 비교 화면이 됩니다.
     - 녹음 도중에 멈춰도 읽은 부분까지만 채점됩니다. 어디까지 읽었는지 알려줄 필요 없습니다.
+    - 슬라이드별로 녹음하면 slide_number 가 결과에 저장되어, 코칭 내역에서
+      "3번 슬라이드 87점"처럼 구분해서 보여줄 수 있습니다.
+    - 없는 슬라이드 번호는 404, 아직 대본이 없는 슬라이드는 422 로 응답합니다.
     - 브라우저 녹음 파일(webm)을 그대로 올리면 서버가 변환해서 처리합니다.
 
 
@@ -390,6 +401,7 @@
 
     { "success": true,
       "data": [ { "id": 5, "project_id": 12, "project_name": "프로젝트명",
+                  "slide_number": 3 또는 null,
                   "accuracy_score": 87.4, "fluency_score": 82.1,
                   "completeness_score": 95.0, "pronunciation_score": 84.3,
                   "feedback": { ... } 또는 null,

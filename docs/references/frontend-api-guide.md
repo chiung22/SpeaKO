@@ -137,10 +137,15 @@ body: `{ "project_id": 12 }`
 `multipart/form-data`
 - `project_id` (필수)
 - `audio_file` (필수) — `.webm` / `.wav` / `.mp3` / `.m4a`, **최대 10MB**
-- `reference_text` (선택) — 생략하면 서버에 저장된 대본 전체를 기준으로 채점
+- `slide_number` (선택) — 슬라이드별로 나눠 녹음할 때 그 번호
+- `reference_text` (선택)
+
+평가 기준 대본 우선순위: `reference_text` > `slide_number`(그 장 대본만) > 대본 전체.
+슬라이드 하나만 읽었는데 전체를 기준으로 채점하면 완성도가 바닥으로 나오므로, 부분 녹음이면 `slide_number`를 넣어주세요.
 
 ```json
 { "success": true, "project_id": 12, "evaluation_id": 5,
+  "slide_number": 3,
   "overall_scores": { "accuracy": 87.4, "fluency": 82.1,
                       "completeness": 95.0, "pronunciation_score": 84.3 },
   "recognized_text": "실제로 인식된 문장",
