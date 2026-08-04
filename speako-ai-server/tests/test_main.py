@@ -1063,3 +1063,109 @@ def test_evaluation_saves_and_returns_recognized_text(monkeypatch, db_session_fa
     listed = client.get("/api/evaluations").json()["data"][0]
     assert listed["recognized_text"] == "메타버스를 소개함니다"
     assert listed["reference_text"]
+
+
+# ── 슬라이드별 부분 녹음 평가 ────────────────────────────────────────────────
+
+def _fake_eval_result():
+    return {
+        "status": "success",
+        "overall_scores": {"accuracy": 88.0, "fluency": 85.0, "completeness": 92.0, "pronunciation_score": 87.0},
+        "recognized_text": "인식된 문장",
+        "words_detail": [{"word": "발전", "accuracy_score": 60.0, "error_type": "Mispronunciation"}],
+    }
+
+
+def test_evaluation_with_slide_number_uses_only_that_slide_script(monkeypatch, db_session_factory):
+    """슬라이드별로 녹음하면 그 장 대본만 기준으로 채점해야 한다.
+    전체 대본을 기준으로 잡으면 한 장만 읽었을 때 완성도가 바닥으로 나온다."""
+    project_id = _create_project(
+        db_session_factory, [(1, "A"), (2, "B")], script_map={1: "첫 번째 장 대본", 2: "두 번째 장 대본"}
+    )
+    seen = {}
+
+    def fake_eval(audio_file_path, reference_text):
+        seen["reference"] = reference_text
+        return _fake_eval_result()
+
+    monkeypatch.setattr(main.azure_evaluator, "evaluate_audio", fake_eval)
+
+    response = client.post(
+        "/api/evaluation/audio",
+        data={"project_id": str(project_id), "slide_number": "2"},
+        files={"audio_file": ("clip.wav", io.BytesIO(b"RIFF"), "audio/wav")},
+    )
+    assert response.status_code == 200
+    # 전체 대본이 아니라 2번 슬라이드 대본만 기준이 돼야 한다.
+    assert seen["reference"] == "두 번째 장 대본"
+    assert response.json()["slide_number"] == 2
+
+
+def test_evaluation_records_slide_number_in_history(monkeypatch, db_session_factory):
+    """코칭 내역에서 '3번 슬라이드 87점'처럼 구분하려면 슬라이드 번호가 남아야 한다."""
+    project_id = _create_project(db_session_factory, [(1, "A"), (2, "B")], script_map={1: "가", 2: "나"})
+    monkeypatch.setattr(main.azure_evaluator, "evaluate_audio", lambda audio_file_path, reference_text: _fake_eval_result())
+
+    client.post(
+        "/api/evaluation/audio",
+        data={"project_id": str(project_id), "slide_number": "2"},
+        files={"audio_file": ("clip.wav", io.BytesIO(b"RIFF"), "audio/wav")},
+    )
+
+    listed = client.get("/api/evaluations").json()["data"][0]
+    assert listed["slide_number"] == 2
+    detail = client.get(f"/api/projects/{project_id}").json()["data"]["evaluations"][0]
+    assert detail["slide_number"] == 2
+
+
+def test_evaluation_without_slide_number_stays_null(monkeypatch, db_session_factory):
+    """대본 전체를 한 번에 녹음한 경우는 슬라이드 번호가 없다(기존 동작 유지)."""
+    project_id = _create_project(db_session_factory, [(1, "A")], script_map={1: "전체 대본"})
+    monkeypatch.setattr(main.azure_evaluator, "evaluate_audio", lambda audio_file_path, reference_text: _fake_eval_result())
+
+    response = client.post(
+        "/api/evaluation/audio",
+        data={"project_id": str(project_id)},
+        files={"audio_file": ("clip.wav", io.BytesIO(b"RIFF"), "audio/wav")},
+    )
+    assert response.status_code == 200
+    assert response.json()["slide_number"] is None
+
+
+def test_evaluation_rejects_unknown_or_empty_slide(monkeypatch, db_session_factory):
+    project_id = _create_project(db_session_factory, [(1, "A"), (2, "B")], script_map={1: "가"})
+    monkeypatch.setattr(main.azure_evaluator, "evaluate_audio", lambda audio_file_path, reference_text: _fake_eval_result())
+
+    # 없는 슬라이드 번호
+    missing = client.post(
+        "/api/evaluation/audio",
+        data={"project_id": str(project_id), "slide_number": "99"},
+        files={"audio_file": ("clip.wav", io.BytesIO(b"RIFF"), "audio/wav")},
+    )
+    assert missing.status_code == 404
+
+    # 대본이 아직 없는 슬라이드
+    empty = client.post(
+        "/api/evaluation/audio",
+        data={"project_id": str(project_id), "slide_number": "2"},
+        files={"audio_file": ("clip.wav", io.BytesIO(b"RIFF"), "audio/wav")},
+    )
+    assert empty.status_code == 422
+
+
+def test_reference_text_wins_over_slide_number(monkeypatch, db_session_factory):
+    """reference_text를 직접 주면 그게 우선이다."""
+    project_id = _create_project(db_session_factory, [(1, "A"), (2, "B")], script_map={1: "가", 2: "나"})
+    seen = {}
+
+    def fake_eval(audio_file_path, reference_text):
+        seen["reference"] = reference_text
+        return _fake_eval_result()
+
+    monkeypatch.setattr(main.azure_evaluator, "evaluate_audio", fake_eval)
+    client.post(
+        "/api/evaluation/audio",
+        data={"project_id": str(project_id), "slide_number": "2", "reference_text": "직접 준 문장"},
+        files={"audio_file": ("clip.wav", io.BytesIO(b"RIFF"), "audio/wav")},
+    )
+    assert seen["reference"] == "직접 준 문장"

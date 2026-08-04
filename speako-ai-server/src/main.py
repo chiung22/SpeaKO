@@ -562,11 +562,17 @@ async def extract_and_convert_words(request: AnalysisRequest, db: Session = Depe
 async def evaluate_pronunciation(
     project_id: int = Form(...),
     reference_text: str = Form(None),
+    slide_number: int = Form(None),
     audio_file: UploadFile = File(...),
     db: Session = Depends(get_db),
 ):
-    """[사용자 음성 발음 평가 API] 사용자의 오디오 파일(WAV/MP3/M4A)과 project_id를 받아 점수를 매기고,
-    평가 결과를 히스토리로 저장합니다. reference_text를 안 주면 DB에 저장된 대본 전체를 기준으로 평가합니다."""
+    """[사용자 음성 발음 평가 API] 오디오 파일과 project_id를 받아 점수를 매기고 히스토리로 저장합니다.
+
+    평가 기준이 되는 대본은 다음 순서로 정해집니다.
+      1) reference_text를 직접 주면 그것
+      2) slide_number를 주면 그 슬라이드의 대본만 (슬라이드별 부분 녹음)
+      3) 둘 다 없으면 프로젝트의 대본 전체
+    slide_number는 결과에도 함께 저장돼서, 코칭 내역에서 "3번 슬라이드 87점"처럼 구분됩니다."""
 
     # 임시 파일로 오디오 저장 (Azure SDK가 물리적인 파일 경로를 요구함)
     temp_file_path = _safe_temp_path(audio_file.filename)
@@ -579,7 +585,20 @@ async def evaluate_pronunciation(
         if not project:
             raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다.")
 
-        text_to_evaluate = reference_text or _compiled_script_text(project)
+        # 슬라이드별 부분 녹음: slide_number를 주면 그 슬라이드 대본만 기준으로 채점한다.
+        # (전체 대본을 기준으로 잡으면 한 장만 읽었을 때 완성도가 바닥으로 나온다)
+        if reference_text:
+            text_to_evaluate = reference_text
+        elif slide_number is not None:
+            slide = next((s for s in project.slides if s.slide_number == slide_number), None)
+            if not slide:
+                raise HTTPException(status_code=404, detail="해당 번호의 슬라이드를 찾을 수 없습니다.")
+            if not (slide.script or "").strip():
+                raise HTTPException(status_code=422, detail="이 슬라이드에는 아직 생성된 대본이 없습니다.")
+            text_to_evaluate = slide.script
+        else:
+            text_to_evaluate = _compiled_script_text(project)
+
         if not text_to_evaluate:
             raise HTTPException(status_code=422, detail="reference_text가 없고, 이 프로젝트에 생성된 대본도 없습니다.")
 
@@ -613,12 +632,14 @@ async def evaluate_pronunciation(
             # 결과 화면에서 "원본 텍스트 ↔ 인식 텍스트"를 나란히 보여주려면 둘 다 남겨야 한다.
             reference_text=text_to_evaluate,
             recognized_text=result.get("recognized_text"),
+            # 슬라이드별로 녹음했으면 몇 번 장이었는지 남긴다(전체 녹음이면 None).
+            slide_number=slide_number,
         )
         db.add(evaluation)
         db.commit()
         db.refresh(evaluation)
 
-        return {"success": True, "project_id": project.id, "evaluation_id": evaluation.id, **result}
+        return {"success": True, "project_id": project.id, "evaluation_id": evaluation.id, "slide_number": evaluation.slide_number, **result}
     except HTTPException:
         raise
     except Exception as e:
@@ -707,6 +728,7 @@ async def list_evaluations(db: Session = Depends(get_db)):
                 "id": e.id,
                 "project_id": e.project_id,
                 "project_name": e.project.name if e.project else None,
+                "slide_number": e.slide_number,  # 슬라이드별 녹음이면 그 번호, 전체 녹음이면 null
                 "accuracy_score": e.accuracy_score,
                 "fluency_score": e.fluency_score,
                 "completeness_score": e.completeness_score,
@@ -744,6 +766,7 @@ async def get_project(project_id: int, db: Session = Depends(get_db)):
             "evaluations": [
                 {
                     "id": e.id,
+                    "slide_number": e.slide_number,  # 슬라이드별 녹음이면 그 번호, 전체 녹음이면 null
                     "accuracy_score": e.accuracy_score,
                     "fluency_score": e.fluency_score,
                     "completeness_score": e.completeness_score,

@@ -56,6 +56,9 @@ class PronunciationEvaluation(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    # 슬라이드별로 나눠 녹음한 경우 그 슬라이드 번호. 대본 전체를 한 번에 녹음했으면 None.
+    # (코칭 내역에서 "3번 슬라이드 87점"처럼 구분하려면 이게 남아 있어야 한다)
+    slide_number = Column(Integer, nullable=True)
     accuracy_score = Column(Float, nullable=True)
     fluency_score = Column(Float, nullable=True)
     completeness_score = Column(Float, nullable=True)
