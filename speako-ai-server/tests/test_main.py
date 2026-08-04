@@ -899,6 +899,82 @@ def test_delete_project_404_for_missing():
     assert client.delete("/api/projects/999999").status_code == 404
 
 
+def _create_evaluation(db_session_factory, project_id, words_detail=None):
+    db = db_session_factory()
+    try:
+        evaluation = models.PronunciationEvaluation(
+            project_id=project_id, accuracy_score=87.4, fluency_score=82.1,
+            completeness_score=95.0, pronunciation_score=86.0,
+            words_detail=words_detail if words_detail is not None else
+            [{"word": "특징을", "accuracy_score": 50.0, "error_type": "Mispronunciation"}],
+        )
+        db.add(evaluation)
+        db.commit()
+        db.refresh(evaluation)
+        return evaluation.id
+    finally:
+        db.close()
+
+
+def test_evaluation_feedback_generates_and_saves(monkeypatch, db_session_factory):
+    project_id = _create_project(db_session_factory, [(1, "내용")], script_map={1: "메타버스를 소개합니다."})
+    evaluation_id = _create_evaluation(db_session_factory, project_id)
+
+    monkeypatch.setattr(
+        main.feedback_generator, "generate_feedback",
+        lambda overall_scores, weak_words, script_excerpt="": {
+            "summary": "전반적으로 또렷합니다.", "strengths": ["속도가 일정합니다."],
+            "improvements": ["받침을 끝까지 발음하세요."], "practice_tips": ["천천히 3번 읽어보세요."],
+        },
+    )
+
+    response = client.post(f"/api/evaluation/{evaluation_id}/feedback")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["cached"] is False
+    assert body["data"]["summary"] == "전반적으로 또렷합니다."
+    # 어떤 단어를 근거로 지적했는지 함께 내려준다.
+    assert body["data"]["weak_words"][0]["word"] == "특징을"
+
+    # 조회 API에도 피드백이 실려 나온다.
+    detail = client.get(f"/api/projects/{project_id}").json()["data"]
+    assert detail["evaluations"][0]["feedback"]["summary"] == "전반적으로 또렷합니다."
+
+
+def test_evaluation_feedback_is_cached_and_not_regenerated(monkeypatch, db_session_factory):
+    """이미 만든 피드백이 있으면 HCX를 다시 부르지 않는다(불필요한 비용 방지)."""
+    project_id = _create_project(db_session_factory, [(1, "내용")], script_map={1: "대본"})
+    evaluation_id = _create_evaluation(db_session_factory, project_id)
+
+    calls = []
+
+    def fake_generate(overall_scores, weak_words, script_excerpt=""):
+        calls.append(1)
+        return {"summary": "첫 생성", "strengths": [], "improvements": [], "practice_tips": []}
+
+    monkeypatch.setattr(main.feedback_generator, "generate_feedback", fake_generate)
+
+    first = client.post(f"/api/evaluation/{evaluation_id}/feedback").json()
+    second = client.post(f"/api/evaluation/{evaluation_id}/feedback").json()
+
+    assert first["cached"] is False and second["cached"] is True
+    assert second["data"]["summary"] == "첫 생성"
+    assert len(calls) == 1, "두 번째 호출에서 HCX를 다시 부르면 안 된다"
+
+
+def test_evaluation_feedback_502_when_generation_fails(monkeypatch, db_session_factory):
+    project_id = _create_project(db_session_factory, [(1, "내용")])
+    evaluation_id = _create_evaluation(db_session_factory, project_id)
+    monkeypatch.setattr(main.feedback_generator, "generate_feedback",
+                        lambda overall_scores, weak_words, script_excerpt="": None)
+
+    assert client.post(f"/api/evaluation/{evaluation_id}/feedback").status_code == 502
+
+
+def test_evaluation_feedback_404_for_missing_evaluation():
+    assert client.post("/api/evaluation/999999/feedback").status_code == 404
+
+
 def test_list_evaluations_returns_all_newest_first(db_session_factory):
     p1 = _create_project(db_session_factory, [(1, "A")])
     p2 = _create_project(db_session_factory, [(1, "B")])

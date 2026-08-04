@@ -61,6 +61,8 @@ class PronunciationEvaluation(Base):
     completeness_score = Column(Float, nullable=True)
     pronunciation_score = Column(Float, nullable=True)
     words_detail = Column(JSON, nullable=True)
+    # AI 코칭 피드백(총평/잘한 점/개선할 점/연습 팁). 평가 직후엔 비어 있고, 피드백 생성 API를 부르면 채워진다.
+    feedback = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=_utcnow, nullable=False)
 
     project = relationship("Project", back_populates="evaluations")
