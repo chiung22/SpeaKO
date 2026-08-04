@@ -6,7 +6,7 @@
 |---|---|---|
 | 사용자 계정/소유권 기반 인가 없음 | 중간 | X-API-Key로 "정당한 호출인지"는 걸러지지만(아래 고친 항목 참고), "누가 호출했는지"는 구분 못함. 지금은 유효한 키만 있으면 아무나 `project_id`를 바꿔가며 남의 프로젝트를 조회/수정 가능. 사용자 계정 시스템이 생겨야 근본 해결. [SECURITY.md](../../SECURITY.md) |
 | TTS 엔드포인트 미연결 | 중간 | `ClovaVoiceClient`가 API 라우터에 없음. `run_pipeline_test.py`/`_batch_generate_and_refine.py`에서만 호출됨. **실제 키(`CLOVA_VOICE_CLIENT_ID`/`SECRET`) 없이는 라우터 연결해도 fallback만 나가서 실질적으로 의미가 없음 — 키 발급 전까지는 보류.** [pronunciation-coaching.md](../product-specs/pronunciation-coaching.md) |
-| DB 마이그레이션 도구 없음 | 낮음 | `Base.metadata.create_all()`로 없는 테이블만 생성하는 방식이라, 기존 테이블 컬럼을 바꾸면 수동으로 `speako-ai-server/data/speako.db`를 지우거나 직접 마이그레이션해야 함. 스키마가 잦아지면 Alembic 등 도입 검토. [db-schema.md](../generated/db-schema.md) |
+| DB 마이그레이션 도구 없음 | 낮음(완화됨) | `Base.metadata.create_all()`은 없는 테이블만 만들고 기존 테이블에 컬럼을 못 붙인다. **완화(2026-08-04)**: `db/database.py`의 `_add_missing_columns()`가 `_EXPECTED_COLUMNS`와 실제 스키마를 비교해 빠진 컬럼만 `ALTER TABLE ADD COLUMN` 해준다(현재 `pronunciation_evaluations`의 `feedback`/`reference_text`/`recognized_text`/`slide_number`). 컬럼 **추가**만 커버하고 타입 변경·삭제·백필은 못 하므로, 스키마 변경이 잦아지면 Alembic 도입 검토. [db-schema.md](../generated/db-schema.md) |
 | `slides.script`에 버전 이력 없음 | 낮음 | 전체 생성/부분 재생성 둘 다 같은 컬럼을 덮어써서, 재생성 전 대본으로 되돌릴 방법이 없음. 필요해지면 별도 이력 테이블 검토. |
 | 구조화 로깅 없음 | 중간 | 전부 `print()`. 요청 추적 ID 없음. 운영 중 디버깅 어려움. [RELIABILITY.md](../../RELIABILITY.md) |
 | **핸들러가 `async def`인데 블로킹 I/O를 직접 호출** | 중간(배포 시) | `main.py`의 엔드포인트가 `async def`인데 내부에서 동기 블로킹 호출(`requests.post`, `subprocess.run`, Azure SDK의 `done.wait(timeout=300)`)을 그대로 실행함. FastAPI는 `async def` 라우트를 스레드풀로 오프로드하지 않으므로, 한 요청이 이벤트루프를 잡으면 다른 요청이 멈춤. **부분 해결(2026-07-23)**: 가장 무거운 `/api/script/full`은 `run_in_threadpool`로 오프로드해 루프를 비워 둠. 나머지(`/api/evaluation/audio`의 ffmpeg·Azure, `/api/analysis/words`의 stdict 등)는 아직 `async def`에서 동기 호출 중 → 마저 처리 필요. 수정: 블로킹 핸들러를 `def`로 바꾸거나 `run_in_threadpool`로 감싸고 워커를 여러 개 띄운다. (2026-07-21 Fable5 검토에서 발견) |
@@ -15,11 +15,9 @@
 | `(project_id, slide_number)` 유니크 제약 없음 | 낮음~중간 | `Slide`에 유니크 제약이 없어, 동시/재시도 `/api/script/full` 호출이 같은 슬라이드 번호를 각각 새로 insert하면 중복 행이 생길 수 있음. `_compiled_script_text`가 둘 다 이어붙여 대본이 꼬임. 단일 사용자 개발 단계에선 발생 확률 낮아 보류. 수정: 모델에 `UniqueConstraint` 추가(+ dev DB 재생성). (Fable5 검토) |
 | TOON 파서가 줄 첫머리 "숫자," 를 슬라이드 구분자로 오인 가능 | 낮음 | `toon_parser.py`의 lookahead가 "줄바꿈 + 숫자 + 쉼표"를 새 레코드로 봄. 대본 줄이 "1,000명이 참석했습니다"처럼 줄 첫머리에 천단위 숫자로 시작하면 거기서 잘림. 시스템 프롬프트로 쉼표 자제를 유도하지만 강제는 아님. (Fable5 검토) |
 | 대본 생성 잘림(`maxTokens`) 감지 없음 | 낮음~중간 | `maxTokens=2000`에 걸려 마지막 슬라이드가 잘려도 잘림 사유를 확인하지 않고 `success: True`로 저장됨. 수정: API의 finish/stop reason 확인. (생성 슬라이드 수를 원본과 비교하는 쪽은 2026-07-23에 구현됨 — 아래 "슬라이드 유실" 항목 참고) |
-| **슬라이드가 많으면 `/api/script/full` 한 요청이 오래 걸림** | 중간(배포 시) | 정렬 보장을 위해 슬라이드 한 장씩 생성한다. **1단계 완화(2026-07-23)**: 슬라이드별 호출이 독립적이라 동시 실행으로 병렬화(`ThreadPoolExecutor`, 동시 상한 `HCX_MAX_CONCURRENCY` 기본 4) + `run_in_threadpool` 오프로드. **실측: AHP 19장 순차 ≈ 80~95초 → 병렬 24.7초(≈3.5배).** 그래도 30장+면 수십 초라 느린 네트워크·프록시 idle 타임아웃엔 여전히 취약. **2단계(예정, 프론트 계약 필요)**: 백그라운드 작업(작업 ID 발급 → 폴링/SSE)으로 전환해 타임아웃을 근본 제거하고 "12/30" 진행률 제공. (2026-07-23) |
-| API 응답에 슬라이드 유실 경고가 없음 | 낮음~중간 | 생성기가 6장 단위로 나눠 요청하고 누락 시 장별로 재시도하지만, 그래도 끝내 못 만든 슬라이드가 있으면 콘솔에만 경고를 찍는다. `/api/script/full` 응답에는 이 사실이 안 실려서 프론트가 "일부 슬라이드는 대본이 없다"는 걸 알 수 없다. 수정: 응답에 `missing_slide_numbers` 같은 필드 추가. (2026-07-23) |
-| 부분 재생성 시 대본 없는 슬라이드는 근거 부족 | 낮음 | `/api/script/partial`의 컨텍스트가 `only_scripted=True`라 아직 script가 없는 슬라이드는 컨텍스트에서 빠지고, `source_content`도 부분 생성기에 안 넘어감 → 그 슬라이드가 무엇인지 모델이 거의 모르는 채 재생성. 수정: 대상 슬라이드의 `source_content`를 컨텍스트에 포함. (Fable5 검토) |
+| **슬라이드가 많으면 `/api/script/full` 한 요청이 오래 걸림** | 중간(배포 시) | 정렬 보장을 위해 슬라이드 한 장씩 생성한다. **1단계 완화(2026-07-23)**: 슬라이드별 호출이 독립적이라 동시 실행으로 병렬화(`ThreadPoolExecutor`, 동시 상한 `HCX_MAX_CONCURRENCY` 기본 4) + `run_in_threadpool` 오프로드. **실측: AHP 19장 순차 ≈ 80~95초 → 병렬 24.7초(≈3.5배).** 그래도 30장+면 수십 초라 느린 네트워크·프록시 idle 타임아웃엔 여전히 취약. **2단계 완료(2026-08-04)**: 백그라운드 작업으로 전환. `POST /api/script/full`이 202 + `job_id`를 즉시 반환하고 `GET /api/script/jobs/{job_id}`로 폴링한다(`utils/job_store.py`, `ThreadPoolExecutor`). 프록시 idle 타임아웃 문제는 이걸로 해소됨. 다만 **작업 상태가 프로세스 메모리에 있어서 워커를 2개 이상 띄우면 깨진다**(아래 별도 행 참고). "12/30" 진행률은 아직 미제공(상태는 processing/completed/failed 3종). |
+| **작업 상태(job_store)가 프로세스 메모리에 있음** | 중간(배포 시) | `utils/job_store.py`가 dict + `threading.Lock`이라 (1) `--workers 2` 이상이면 접수한 워커와 폴링받는 워커가 달라 404가 나고 (2) 재시작하면 진행 중 작업이 증발한다. 지금은 단일 워커 전제(`Dockerfile`에 주석으로 명시). 수정: Redis 등 외부 저장소 또는 DB 테이블로 이전. (2026-08-04) |
 | 로컬 헬퍼 스크립트(`src/_*.py`)와 실제 API의 이중 파이프라인 | 낮음 | `run_pipeline_test.py`/`_batch_generate_and_refine.py` 등은 `script_storage.py`로 `projects/<name>/scripts/`에 파일로 저장하는 옛 구조를 씀. 실제 API는 DB에 저장. `script_storage.py`는 `main.py`가 안 씀(고아). 로컬 디버깅 전용임을 명시하거나 정리 필요. (Fable5 검토) |
-| 발음 평가에 AI 생성 정성 피드백 없음 | 중간 | Figma "Coach View Page"/"Feedback Page"에 점수(87점 등) 옆에 "발음 팁"(명백한 자음 발음/끝소리 주의/강세와 억양 등)과 "상세 피드백"이 AI 생성 텍스트로 표시됨. 지금 `/api/evaluation/audio`는 Azure의 숫자 점수 + 단어별 정확도만 반환하고, 이런 질적 피드백 문장을 생성하는 단계가 없음(Azure SDK가 주는 게 아니라 별도 HCX 호출로 만들어야 함). 프롬프트/포맷 설계가 필요해서 보류. |
 | 카테고리 분류 정확도 한계 | 낮음~중간 | 장단음은 표준국어대사전 검색 첫 결과만 대표로 씀 — 동음이의어 의미 중의성(문맥상 어떤 뜻인지)은 해소 안 함. 연음은 "받침+무초성 음절" 구조만 보는 휴리스틱이라, 실제로는 구개음화 등 다른 음운 현상인 경우도 연음으로 분류될 수 있음(예: "굳이"→"구지"는 구개음화지만 구조상 연음 패턴과 같아 연음으로 분류됨). `utils/stdict_client.py`, `utils/hangul_phonology.py` 참고. |
 | ETRI_API_KEY 미발급 | 낮음(완화됨) | 문의 답변 대기 중이나, **Kiwi(kiwipiepy) 로컬 형태소 분석기로 대체**해서 키 없이도 실사용 품질로 동작함(2026-07-22). 단어 추출 체인이 ETRI(키 있을 때) → Kiwi(현재 주력) → 빈도 휴리스틱(방어) 순이라, 나중에 ETRI 키가 발급되면 그냥 키만 넣으면 ETRI가 우선한다. Kiwi가 ETRI와 완전히 동일한 정확도를 보장하진 않지만(태그셋/학습데이터 상이), 여기서 필요한 "명사/고유명사/외국어 2글자+ 추출"은 관대한 과제라 실질 차이가 작고, 오히려 조사 제거·단일글자 처리는 기존 빈도 폴백보다 나음. `nlp/kiwi_analyzer.py` |
 | CLOVA_VOICE 키 미발급 | 낮음 | TTS가 API 라우터에 아직 연결 안 돼 있어서(위 항목) 지금 당장 급하지 않음 |
@@ -74,3 +72,20 @@
 - **`apikey_발급.txt`가 `.gitignore` 미포함(레포 공개 전환 후)** → `apikey*` 패턴 추가(현재 파일에 실제 키는 없으나 실수 방지용).
 
 > 위에서 **고치지 않고 문서화만 한** 항목(이벤트루프 블로킹, 업로드 본문 크기, 레이트리밋, 유니크 제약, TOON 줄첫머리 숫자, maxTokens 잘림 감지 등)은 이 표 상단에 별도 행으로 추가되어 있음. 대부분 "프론트 붙고 실제 배포하기 전" 처리 대상.
+
+### 2026-08-04 라운드에서 고친 항목
+
+라이브 서버(실제 HCX/Azure 키)로 직접 호출해가며 검증한 라운드. **단위 테스트만으론 안 잡히던 버그가 두 건 나왔다** — 아래 첫 두 항목.
+
+- **부분 재생성이 항상 502로 실패하고 있었음(실사용 기능 정지)** → 해결. 시스템 프롬프트가 TOON 형식을 요구했는데 모델은 `slides[2]{slide_number,script}:` 헤더만 붙이고 본문은 평문으로 썼다. 파서가 빈 결과를 내고 **멀쩡한 대본이 502로 폐기**됐다. 단위 테스트의 모킹 응답은 TOON을 지켰기 때문에 통과 중이었고, 라이브 호출에서만 드러났다. 한 장짜리 요청에 TOON 껍데기는 애초에 필요가 없어서 요구를 제거하고, 라벨/마크다운을 털어내는 `clean_script_text()`를 `toon_parser.py`에 공용으로 뺐다(전체 생성도 같은 함수 사용). 라이브 재현 → 502에서 200으로 확인.
+- **G2P가 조용히 폴백 모드로 돌고 있었음** → 해결. `g2pkk`가 의존하는 eunjeon MeCab 사전이 없어서 예외 없이 "철자 그대로" 반환 중이었다(실시간→[실시간], 연음 탐지 0건). 즉 발음 코칭의 하이라이트 기능이 사실상 죽어 있었다. Kiwi(kiwipiepy)로 `pos()` 인터페이스를 흉내내는 shim(`_KiwiMecabShim`)을 만들어 주입. 초기화 시 `g2p("국물") == "궁물"`로 **실제 변환을 돌려서 검증**하게 했는데, 이 과정에서 리눅스에서 터질 잠복 버그도 같이 잡혔다(mecab=None은 생성 시점엔 통과하고 호출할 때마다 실패).
+- API 응답에 슬라이드 유실 경고가 없음 → 해결. `generate_full_script`가 `{"slides": [...], "missing_slide_numbers": [...]}`를 반환하고 폴링 응답의 `data`에 그대로 실린다. 프론트가 "3, 7번 슬라이드는 생성에 실패했습니다"를 띄울 수 있음.
+- 부분 재생성 시 대본 없는 슬라이드는 근거 부족 → 해결. `main.py`가 `target_slide.source_content`를 `generate_partial_script()`에 넘기고, 생성기가 `[대상 슬라이드 원문 — 이 내용을 근거로 쓰세요]` 블록을 전체 대본 컨텍스트보다 **앞에** 넣는다.
+- 발음 평가에 AI 생성 정성 피드백 없음 → 해결. `clova/feedback/generator.py` 신규. `POST /api/evaluation/{evaluation_id}/feedback`이 총평/발음 팁/상세 피드백/연습 제안 4개 섹션을 생성하고 `evaluations.feedback`에 캐시한다(재요청 시 HCX 재호출 안 함). **근거 없는 칭찬을 막는 게 핵심**이었다 — 초기 버전이 점수 데이터에 없는 단어("인공지능", "서비스")를 지어내 칭찬해서, 잘한 단어도 실제 점수(≥90)에서 뽑아 넘기고 "여기 있는 단어에서만 고르라"는 규칙을 프롬프트에 박았다.
+- 대본 생성 결과 편집 불가 → 해결. `PUT/POST/DELETE /api/projects/{id}/slides[/{n}]`. 추가·삭제 후 항상 1..N으로 재정렬(`_resequence`), 마지막 한 장 삭제는 422로 차단.
+- 슬라이드별 부분 녹음을 평가해도 몇 번 슬라이드였는지 기록에 안 남음 → 해결. `/api/evaluation/audio`에 `slide_number` 폼 필드 추가(주면 그 슬라이드 대본을 reference로 씀), `pronunciation_evaluations`에 `slide_number`/`reference_text`/`recognized_text` 컬럼 추가.
+- Figma의 "원문 vs 인식된 발음" 대조 화면을 만들 수 없었음 → 해결. Azure 연속 인식 콜백에서 세그먼트를 모아 `recognized_text`로 반환.
+- 대본 중간 슬라이드가 "감사합니다"로 끝나거나 "OOO" 자리표시자가 남음 → 해결. 첫 슬라이드 지시문 수정 + 마지막 장이 아니면 맺음 인사를 정규식으로 제거(`_strip_closing_greeting`). 프롬프트로 부탁만 하지 않고 후처리로 확정.
+- 배포 시 프론트에서 CORS로 전부 막혔을 상태 → 해결. `CORS_ALLOW_ORIGINS` 환경변수 + Vercel 프리뷰 도메인용 `allow_origin_regex`. `speakofront.vercel.app` 기본 포함.
+- ffmpeg 설치 방법이 문서에만 있고 배포 재현이 안 됨 → 해결. `Dockerfile` 추가(python:3.12-slim + ffmpeg). 워커 1개 전제인 이유도 주석으로 명시.
+- Figma export 폴더가 3개로 갈라져 어느 게 최신인지 알 수 없었음 → 해결. `docs/figma/UMC 10th_SpeaKO (1)/` 하나로 통합(겹치면 최신본 우선, 고유 파일 전부 이관).
