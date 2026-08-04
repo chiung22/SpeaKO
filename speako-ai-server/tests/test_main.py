@@ -1199,3 +1199,45 @@ def test_partial_regeneration_survives_header_only_response(monkeypatch, db_sess
         assert saved[1] == "가", "다른 슬라이드는 건드리면 안 된다"
     finally:
         db.close()
+
+
+def test_partial_regeneration_includes_slide_source_content(monkeypatch, db_session_factory):
+    """대상 슬라이드의 원문을 넘겨야 모델이 그 장이 무슨 내용인지 알고 다시 쓸 수 있다.
+    (원문이 없으면 앞뒤 대본만 보고 지어낸다 — 특히 아직 대본이 없는 슬라이드)"""
+    project_id = _create_project(
+        db_session_factory, [(1, "첫 장 원문"), (2, "시장 규모와 성장률 도표")], script_map={1: "가"}
+    )
+    sent = {}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        sent["prompt"] = json["messages"][-1]["content"][0]["text"]
+        return _FakeResponse({"result": {"message": {"content": "다시 쓴 대본입니다."}}})
+
+    monkeypatch.setattr(main.partial_generator, "use_fallback", False)
+    monkeypatch.setattr(partial_gen_module.requests, "post", fake_post)
+
+    response = client.post(
+        "/api/script/partial",
+        json={"project_id": project_id, "target_slide": 2, "style": "격식체"},
+    )
+    assert response.status_code == 200
+    # 아직 대본이 없는 2번 슬라이드라도 원문이 프롬프트에 들어가야 한다.
+    assert "시장 규모와 성장률 도표" in sent["prompt"]
+    assert "대상 슬라이드 원문" in sent["prompt"]
+
+
+def test_script_job_reports_missing_slides(monkeypatch, db_session_factory):
+    """생성 실패한 슬라이드가 있으면 폴링 응답으로 프론트가 알 수 있어야 한다."""
+    project_id = _create_project(db_session_factory, [(1, "가"), (2, "나")])
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        prompt = json["messages"][-1]["content"][0]["text"]
+        content = "" if "Slide 2" in prompt else "정상 대본입니다."
+        return _FakeResponse({"result": {"message": {"content": content}}})
+
+    monkeypatch.setattr(main.full_generator, "use_fallback", False)
+    monkeypatch.setattr(full_gen_module.requests, "post", fake_post)
+
+    body = _generate_full_and_wait({"project_id": project_id, "presentation_time": 2, "style": "격식체"})
+    assert body["status"] == "completed"
+    assert body["data"]["missing_slide_numbers"] == ["2"]

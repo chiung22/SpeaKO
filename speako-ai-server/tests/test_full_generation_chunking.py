@@ -274,3 +274,24 @@ def test_greeting_only_script_is_kept(monkeypatch):
     from clova.full_generation.generator import _strip_closing_greeting
 
     assert _strip_closing_greeting("감사합니다.") == "감사합니다."
+
+
+def test_missing_slides_are_reported_in_result(monkeypatch):
+    """끝내 못 만든 슬라이드는 콘솔에만 찍지 말고 결과에 실어야 한다.
+    안 그러면 프론트가 '왜 이 장만 비어 있지?'를 알 수 없다."""
+
+    def responder(user_prompt):
+        # 2번 슬라이드만 계속 빈 응답 -> 재시도까지 실패
+        return "" if "2번 슬라이드 내용" in user_prompt else "정상 대본입니다."
+
+    _stub_hcx(monkeypatch, responder)
+    result = _generator().generate_full_script(_ppt_text(3), 3, "격식체")
+
+    assert [s["slide_number"] for s in result["slides"]] == ["1", "3"]
+    assert result["missing_slide_numbers"] == ["2"]
+
+
+def test_no_missing_slides_reports_empty_list(monkeypatch):
+    _stub_hcx(monkeypatch, lambda user_prompt: "정상 대본입니다.")
+    result = _generator().generate_full_script(_ppt_text(2), 2, "격식체")
+    assert result["missing_slide_numbers"] == []

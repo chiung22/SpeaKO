@@ -498,6 +498,9 @@ async def create_partial_script(request: PartialScriptRequest, db: Session = Dep
         request.style,
         request.extra_requirement,
         request.audience,
+        # 이 슬라이드의 원문(PPT에서 추출한 내용). 없으면 모델은 이 장이 무슨 내용인지 거의 모른 채
+        # 앞뒤 대본만 보고 지어내게 된다.
+        target_slide.source_content or "",
     )
 
     if not result or "script" not in result:
