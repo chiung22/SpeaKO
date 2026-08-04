@@ -22,6 +22,7 @@ import hmac
 # 1. 분리해둔 AI 클라이언트 모듈들 임포트
 from clova.full_generation.generator import FullScriptGenerator
 from clova.partial_generation.generator import PartialScriptGenerator
+from clova.feedback.generator import PronunciationFeedbackGenerator, collect_weak_words
 from etri.etri_client import EtriLanguageAnalyzer
 from nlp.kiwi_analyzer import KiwiAnalyzer
 from g2p.g2p_client import G2pConverter
@@ -131,6 +132,7 @@ etri_analyzer = EtriLanguageAnalyzer()
 kiwi_analyzer = KiwiAnalyzer()
 g2p_converter = G2pConverter()
 azure_evaluator = PronunciationEvaluator()
+feedback_generator = PronunciationFeedbackGenerator()
 ppt_extractor = PptExtractor()
 stdict_client = StdictClient()
 
@@ -615,6 +617,41 @@ async def evaluate_pronunciation(
                 except OSError as cleanup_err:
                     print(f"⚠️ 임시 파일 삭제 실패({path}): {cleanup_err}")
 
+@api.post("/api/evaluation/{evaluation_id}/feedback")
+async def create_evaluation_feedback(evaluation_id: int, db: Session = Depends(get_db)):
+    """[AI 발음 피드백 API] 점수만으로는 무엇을 고쳐야 할지 알 수 없으므로, 점수와 실제로 틀린 단어를
+    근거로 코칭 피드백(총평/잘한 점/개선할 점/연습 팁)을 생성해 저장하고 반환합니다.
+    이미 생성된 피드백이 있으면 다시 만들지 않고 그대로 돌려줍니다(불필요한 HCX 비용 방지)."""
+    evaluation = db.get(models.PronunciationEvaluation, evaluation_id)
+    if not evaluation:
+        raise HTTPException(status_code=404, detail="평가 결과를 찾을 수 없습니다.")
+
+    if evaluation.feedback:
+        return {"success": True, "evaluation_id": evaluation.id, "data": evaluation.feedback, "cached": True}
+
+    overall_scores = {
+        "accuracy": evaluation.accuracy_score,
+        "fluency": evaluation.fluency_score,
+        "completeness": evaluation.completeness_score,
+        "pronunciation_score": evaluation.pronunciation_score,
+    }
+    weak_words = collect_weak_words(evaluation.words_detail)
+    script_excerpt = _compiled_script_text(evaluation.project) if evaluation.project else ""
+
+    feedback = await run_in_threadpool(
+        feedback_generator.generate_feedback, overall_scores, weak_words, script_excerpt
+    )
+    if not feedback:
+        raise HTTPException(status_code=502, detail="발음 피드백 생성에 실패했습니다.")
+
+    # 어떤 단어를 근거로 지적했는지 프론트가 함께 보여줄 수 있도록 같이 저장한다.
+    feedback["weak_words"] = weak_words
+    evaluation.feedback = feedback
+    db.commit()
+    db.refresh(evaluation)
+
+    return {"success": True, "evaluation_id": evaluation.id, "data": evaluation.feedback, "cached": False}
+
 @api.get("/api/projects")
 async def list_projects(db: Session = Depends(get_db)):
     """[프로젝트 히스토리 목록 API]"""
@@ -653,6 +690,7 @@ async def list_evaluations(db: Session = Depends(get_db)):
                 "fluency_score": e.fluency_score,
                 "completeness_score": e.completeness_score,
                 "pronunciation_score": e.pronunciation_score,
+                "feedback": e.feedback,  # 아직 생성 안 했으면 null
                 "created_at": e.created_at.isoformat(),
             }
             for e in evaluations
@@ -687,6 +725,7 @@ async def get_project(project_id: int, db: Session = Depends(get_db)):
                     "fluency_score": e.fluency_score,
                     "completeness_score": e.completeness_score,
                     "pronunciation_score": e.pronunciation_score,
+                    "feedback": e.feedback,  # 아직 생성 안 했으면 null
                     "created_at": e.created_at.isoformat(),
                 }
                 for e in project.evaluations
