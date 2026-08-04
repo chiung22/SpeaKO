@@ -66,6 +66,22 @@ def _clean_single_slide_script(text):
     return script
 
 
+# 발표 중간 슬라이드에서 나오면 안 되는 마무리 인사. 프롬프트로 금지해도 모델이 종종 붙인다
+# (실측: 제로 PPT 재생성 8장 중 2장이 중간인데 "감사합니다"로 끝남). 지시에만 기대지 않고 코드로 지운다.
+_CLOSING_GREETING_PATTERN = re.compile(
+    r"(?:\s*(?:이상입니다|감사합니다|경청해\s*주셔서\s*감사합니다|들어주셔서\s*감사합니다|"
+    r"감사드립니다|고맙습니다)[.!]?\s*)+$"
+)
+
+
+def _strip_closing_greeting(script):
+    """중간 슬라이드 끝에 붙은 마무리 인사를 제거한다. 인사만 남으면(=지우면 빈 대본) 원문을 유지한다."""
+    if not script:
+        return script
+    stripped = _CLOSING_GREETING_PATTERN.sub("", script).strip()
+    return stripped if stripped else script
+
+
 def _position_label(index, total):
     """
     발표 중 이 슬라이드의 위치를 "지시문"으로 돌려준다.
@@ -128,7 +144,8 @@ class FullScriptGenerator:
         def build_one(item):
             index, (number, block) = item
             slides = self._request_one_slide(
-                number, block, _position_label(index, len(blocks)), per_slide_time, style, extra_requirement, audience, topic
+                number, block, _position_label(index, len(blocks)), per_slide_time, style, extra_requirement, audience, topic,
+                is_last=(index == len(blocks) - 1),
             )
             return number, slides
 
@@ -150,7 +167,7 @@ class FullScriptGenerator:
         all_slides.sort(key=lambda s: int(s["slide_number"]))
         return {"slides": all_slides}
 
-    def _request_one_slide(self, slide_number, block, position, presentation_time, style, extra_requirement, audience="", topic=""):
+    def _request_one_slide(self, slide_number, block, position, presentation_time, style, extra_requirement, audience="", topic="", is_last=True):
         """
         한 장만 요청할 때는 **TOON 포맷을 쓰지 않는다.**
         응답 전체가 곧 이 슬라이드의 대본이므로 구분자가 필요 없고, 오히려 껍데기를 요구하면
@@ -166,6 +183,9 @@ class FullScriptGenerator:
             )
             script = _clean_single_slide_script(text)
             if script:
+                # 마지막 장이 아니면 "감사합니다" 같은 마무리 인사를 지운다(프롬프트 금지를 모델이 자주 어김).
+                if not is_last:
+                    script = _strip_closing_greeting(script)
                 return [{"slide_number": slide_number, "script": script}]
             if attempt == 0:
                 print(f"  ↻ 슬라이드 {slide_number} 응답이 비어 한 번 더 시도합니다.")

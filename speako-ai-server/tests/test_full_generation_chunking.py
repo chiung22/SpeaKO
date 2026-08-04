@@ -237,3 +237,40 @@ def test_non_slide_input_is_sent_as_is(monkeypatch):
 
     assert len(sent) == 1
     assert result["slides"][0]["script"] == "브리프 기반 대본"
+
+
+# ── 중간 슬라이드의 마무리 인사 제거 ──────────────────────────────────────────
+# 프롬프트에 "마무리 인사(감사합니다 등)를 넣지 마세요"라고 이미 금지했는데도 모델이 자주 어긴다
+# (실측: 제로 PPT 8장 재생성에서 중간 슬라이드 2장이 "감사합니다"로 끝남). 코드로 확실히 지운다.
+
+def test_closing_greeting_is_stripped_from_middle_slides(monkeypatch):
+    def responder(user_prompt):
+        return "이 슬라이드의 내용을 설명드리겠습니다. 감사합니다."
+
+    _stub_hcx(monkeypatch, responder)
+    result = _generator().generate_full_script(_ppt_text(3), 3, "격식체")
+
+    scripts = {s["slide_number"]: s["script"] for s in result["slides"]}
+    assert scripts["1"] == "이 슬라이드의 내용을 설명드리겠습니다."
+    assert scripts["2"] == "이 슬라이드의 내용을 설명드리겠습니다."
+    # 마지막 장은 마무리 인사가 정상이므로 그대로 둔다.
+    assert scripts["3"] == "이 슬라이드의 내용을 설명드리겠습니다. 감사합니다."
+
+
+def test_various_closing_greetings_are_stripped(monkeypatch):
+    from clova.full_generation.generator import _strip_closing_greeting
+
+    assert _strip_closing_greeting("본문입니다. 경청해 주셔서 감사합니다.") == "본문입니다."
+    assert _strip_closing_greeting("본문입니다. 이상입니다.") == "본문입니다."
+    assert _strip_closing_greeting("본문입니다. 감사합니다. 이상입니다.") == "본문입니다."
+    # 인사가 없으면 그대로 둔다.
+    assert _strip_closing_greeting("본문입니다.") == "본문입니다."
+    # 문장 중간의 '감사'는 건드리지 않는다.
+    assert _strip_closing_greeting("감사 인사를 전하는 문화를 살펴봅니다.") == "감사 인사를 전하는 문화를 살펴봅니다."
+
+
+def test_greeting_only_script_is_kept(monkeypatch):
+    """지우면 빈 대본이 되는 경우엔 원문을 유지한다(내용 유실 방지)."""
+    from clova.full_generation.generator import _strip_closing_greeting
+
+    assert _strip_closing_greeting("감사합니다.") == "감사합니다."
