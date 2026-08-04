@@ -610,6 +610,9 @@ async def evaluate_pronunciation(
             completeness_score=scores.get("completeness"),
             pronunciation_score=scores.get("pronunciation_score"),
             words_detail=result.get("words_detail"),
+            # 결과 화면에서 "원본 텍스트 ↔ 인식 텍스트"를 나란히 보여주려면 둘 다 남겨야 한다.
+            reference_text=text_to_evaluate,
+            recognized_text=result.get("recognized_text"),
         )
         db.add(evaluation)
         db.commit()
@@ -709,6 +712,8 @@ async def list_evaluations(db: Session = Depends(get_db)):
                 "completeness_score": e.completeness_score,
                 "pronunciation_score": e.pronunciation_score,
                 "feedback": e.feedback,  # 아직 생성 안 했으면 null
+                "reference_text": e.reference_text,   # 원본 대본
+                "recognized_text": e.recognized_text,  # Azure가 실제로 인식한 텍스트
                 "created_at": e.created_at.isoformat(),
             }
             for e in evaluations
@@ -744,6 +749,9 @@ async def get_project(project_id: int, db: Session = Depends(get_db)):
                     "completeness_score": e.completeness_score,
                     "pronunciation_score": e.pronunciation_score,
                     "feedback": e.feedback,  # 아직 생성 안 했으면 null
+                    "reference_text": e.reference_text,   # 원본 대본
+                    "recognized_text": e.recognized_text,  # Azure가 실제로 인식한 텍스트
+                    "words_detail": e.words_detail,        # 단어별 점수(하이라이팅용)
                     "created_at": e.created_at.isoformat(),
                 }
                 for e in project.evaluations

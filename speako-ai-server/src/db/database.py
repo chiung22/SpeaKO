@@ -43,7 +43,7 @@ def init_db():
 # 그래서 모델에 컬럼을 새로 넣으면 기존 DB 파일에서는 그 컬럼이 없어 조회가 깨진다.
 # 마이그레이션 도구(alembic)를 붙일 규모는 아니라, 빠진 컬럼만 ALTER로 채우는 최소 장치를 둔다.
 _EXPECTED_COLUMNS = {
-    "pronunciation_evaluations": {"feedback": "JSON"},
+    "pronunciation_evaluations": {"feedback": "JSON", "reference_text": "TEXT", "recognized_text": "TEXT"},
 }
 
 
