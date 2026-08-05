@@ -55,6 +55,51 @@ SpeaKO AI 서버(FastAPI)의 엔드포인트 계약입니다. 프론트엔드가
 | `project_id` / `target_slide` / `position` | 1 이상 |
 | 프로젝트당 슬라이드 수 (PPTX/PDF 업로드) | 100장 (초과 시 `413`) |
 
+### 단어 목록 응답 (`POST /api/analysis/words`)
+
+`Coach View Page` 단어 목록 탭에 필요한 값이 전부 들어 있습니다.
+
+```json
+{ "word": "특정", "phoneme": "[특쩡]", "category": "표기-발음불일치",
+  "description": "경음화: 받침 뒤에 오는 예사소리(ㄱ, ㄷ, ㅂ, ㅅ, ㅈ)가 된소리로 바뀌어 발음됩니다." }
+```
+
+- `category`: `"장단음"` / `"연음"` / `"표기-발음불일치"` / `null`(철자=발음). **색은 프론트가 정합니다** (장단음 `#F7358E`, 연음 `#0072F2`, 표기불일치 `#F79322`).
+- `phoneme`: 장단음이면 **장음 기호 `ː`가 해당 음절 뒤에 붙습니다** (`구성` → `[구ː성]`).
+- `description`: 구체적 음운 현상 이름 + 설명. 규칙 판정에 실패하면 "표기와 발음이 다릅니다…"로 물러납니다.
+- `summary`의 카테고리별 개수를 필터 칩 숫자에 그대로 쓰면 됩니다.
+
+같은 값이 `GET /api/projects/{id}`의 `difficult_words`에도 저장돼 내려갑니다.
+
+### 발음 평가 응답 (`POST /api/evaluation/audio`)
+
+`Feedback Page`에서 틀린 부분을 **원본·인식 양쪽에** `#FF7676`으로 강조하는 데 필요한 값입니다.
+
+```json
+{ "reference_text": "Slide 1: 안녕하세요 여러분",
+  "recognized_text": "안녕하세요 그리고",
+  "words_detail": [
+    { "word": "여러분", "error_type": "Omission",
+      "reference_span": [12, 15], "recognized_span": null }
+  ] }
+```
+
+- `reference_span` / `recognized_span`은 **`[시작, 끝]` 문자 인덱스**입니다. `null`이면 그쪽 텍스트에는 없다는 뜻입니다(`Omission`은 원본에만, `Insertion`은 인식에만).
+- ⚠️ 오프셋은 **응답의 `reference_text` 기준**입니다. 대본을 이어붙일 때 `"Slide N: "` 접두어가 붙으므로, 프론트가 따로 가지고 있는 원본 문자열로 자르면 엉뚱한 곳이 나옵니다. **반드시 응답의 `reference_text`를 쓰세요.**
+- 위치를 못 찾으면 `null`입니다(문장부호 차이 등). 엉뚱한 곳을 칠하지 않도록 일부러 비웁니다.
+
+### AI 피드백 응답 (`POST /api/evaluation/{id}/feedback`)
+
+`practice_tips`는 `Coach View Page` 우측 "발음 팁"(아이콘 + 제목 + 설명 3개)에 대응합니다.
+
+```json
+"practice_tips": [
+  { "key": "consonant", "title": "명확한 자음 발음", "description": "'ㄷ, ㅈ, ㅅ' 계열 자음을 더 또렷하게 발음해보세요." }
+]
+```
+
+`key`는 `consonant` / `ending` / `intonation` / `speed` / `volume` / `general` 중 하나입니다. **아이콘은 이 `key`로 매핑하세요** — `title`은 매번 달라집니다. `general`은 분류가 없는 경우(옛 데이터 포함)이니 기본 아이콘을 쓰면 됩니다.
+
 ---
 
 ## 전체 흐름 한눈에

@@ -112,7 +112,46 @@ def parse_feedback_sections(text):
                     items.append(line)
             result[key] = items
 
+    result["practice_tips"] = normalize_practice_tips(result["practice_tips"])
     return result
+
+
+# 프론트가 아이콘을 고를 때 쓰는 분류. 모델이 엉뚱한 값을 쓰면 general로 떨어뜨린다.
+_TIP_KEYS = ("consonant", "ending", "intonation", "speed", "volume")
+
+
+def normalize_practice_tips(tips):
+    """연습 팁을 [{key, title, description}] 형태로 정규화한다.
+
+    화면에서 아이콘 + 제목 + 설명으로 그려지므로(피그마 Coach View Page) 제목과 설명이
+    분리돼 있어야 하고, 아이콘을 고르려면 안정적인 key가 필요하다.
+
+    **옛 형식(문자열 리스트)도 그대로 받는다.** 이미 생성돼 `evaluations.feedback`에 캐시된
+    피드백이 있기 때문이다(재요청해도 HCX를 다시 부르지 않고 그 값을 반환한다). 형식을 바꾸면서
+    옛 캐시를 못 읽으면 지난 평가 화면이 깨진다.
+    """
+    normalized = []
+    for tip in tips or []:
+        if isinstance(tip, dict):
+            key = tip.get("key") if tip.get("key") in _TIP_KEYS else "general"
+            normalized.append({
+                "key": key,
+                "title": (tip.get("title") or "").strip(),
+                "description": (tip.get("description") or "").strip(),
+            })
+            continue
+
+        parts = [part.strip() for part in str(tip).split("|")]
+        if len(parts) >= 3 and parts[0] in _TIP_KEYS:
+            normalized.append({"key": parts[0], "title": parts[1], "description": " ".join(parts[2:]).strip()})
+        elif len(parts) == 2:
+            # 분류 없이 "제목 | 설명"만 준 경우.
+            normalized.append({"key": "general", "title": parts[0], "description": parts[1]})
+        else:
+            # 옛 형식(문장 하나) 또는 형식을 안 지킨 경우 — 내용은 살리고 제목만 비운다.
+            normalized.append({"key": "general", "title": "", "description": str(tip).strip()})
+
+    return normalized
 
 
 class PronunciationFeedbackGenerator:
@@ -149,7 +188,10 @@ class PronunciationFeedbackGenerator:
         - (1~3개)
 
         [연습 팁]
-        - (2~3개)
+        정확히 3줄. 각 줄은 `분류 | 제목 | 설명` 형식으로 쓰세요.
+        분류는 consonant(자음) / ending(끝소리) / intonation(강세·억양) / speed(속도) / volume(성량)
+        중에서만 고르고, 서로 다른 분류 3개를 쓰세요. 제목은 10자 이내입니다.
+        예) consonant | 명확한 자음 발음 | 'ㄷ, ㅈ, ㅅ' 계열 자음을 더 또렷하게 발음해보세요.
         """
 
     def generate_feedback(self, overall_scores, weak_words, script_excerpt="", strong_words=None):
