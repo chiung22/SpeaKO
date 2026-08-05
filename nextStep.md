@@ -15,7 +15,7 @@ API 키(ETRI/Azure/Clova Voice) 발급 대기 중 진행 가능한 작업들을 
 | 작업 디렉터리 | `c:\Users\송치웅\Desktop\Project\SpeaKO` (AI 서버는 `speako-ai-server/`) |
 | 브랜치 | `main` (워킹트리 깨끗함, 로컬 브랜치 main 하나) |
 | 최신 커밋 | `ac8754e` (PR #18 머지) |
-| 테스트 | **149건 통과** |
+| 테스트 | **160건 통과** |
 | 엔드포인트 | 15개 (`src/main.py`) |
 
 **테스트 실행법** — 시스템 파이썬(3.12.2)·venv 둘 다 `requirements-dev.txt`를 설치해 두었으므로 어느 쪽으로 돌려도 됩니다(8/04 실측, 양쪽 149건 통과):
@@ -29,7 +29,7 @@ cd speako-ai-server && ./venv/Scripts/python.exe -m pytest tests/ -q   # venv
 
 배포하면 터지지만 로컬에선 안 터지는 것들부터. 전부 [tech-debt-tracker.md](docs/exec-plans/tech-debt-tracker.md) 표에 근거가 있습니다.
 
-1. **입력 길이 상한 추가** — `main.py`의 `script_text`/`topic`/`outline`/`extra_requirement`에 Pydantic `Field(max_length=...)`가 없어, 호출자가 유료 API(HCX/Azure) 비용을 무제한으로 유발할 수 있음.
+1. ~~**입력 길이 상한 추가**~~ — **완료(8/04)**. `MAX_*_LEN` 상수 + `Field`/`Form` 검증으로 강제하고, 코칭 파일 업로드로 우회하는 경로(추출 텍스트가 상한 초과 시 413)까지 막음. `tests/test_input_limits.py` 11건. 남은 비용 벡터 2개는 tech-debt-tracker에 등록: **레이트 리밋**(요청 횟수), **슬라이드 개수 상한**(장당 HCX 1회라 500페이지 PDF = 500회).
 2. **블로킹 I/O 오프로드 마무리** — `/api/script/full`만 `run_in_threadpool`로 처리됨. `/api/evaluation/audio`(ffmpeg `subprocess.run` + Azure `done.wait`), `/api/analysis/words`(stdict HTTP)는 아직 `async def` 안에서 동기 호출 중 → 한 요청이 이벤트루프를 잡으면 다른 요청이 멈춤.
 3. **업로드 본문 크기 상한** — `_save_upload_with_limit`는 413을 내지만, 그 시점엔 이미 multipart 전체가 파싱된 뒤. ASGI 미들웨어 또는 프록시 레벨 차단 필요.
 4. **레이트 리밋** (slowapi 등).

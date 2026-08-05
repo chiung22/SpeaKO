@@ -9,7 +9,7 @@ if sys.stdout.encoding.lower() != "utf-8":
 from fastapi import FastAPI, APIRouter, UploadFile, File, Form, Header, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.concurrency import run_in_threadpool
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from typing import Literal, Optional
 from concurrent.futures import ThreadPoolExecutor
@@ -94,6 +94,21 @@ ALLOWED_COACHING_EXTENSIONS = {".docx", ".txt", ".pdf"}
 # ffmpeg가 이 포맷들을 전부 16kHz mono WAV로 변환하므로(convert_to_wav), 프론트가 녹음한 걸 그대로 받는다.
 ALLOWED_AUDIO_EXTENSIONS = {".wav", ".mp3", ".m4a", ".webm"}
 UPLOAD_CHUNK_SIZE = 1024 * 1024  # 1MB
+
+# 텍스트 입력 길이 상한 (비용·DoS 방지)
+# 파일 크기 제한과 같은 이유다. 아래 값들은 대부분 그대로 HCX 프롬프트에 실려 나가므로,
+# 상한이 없으면 호출 한 번으로 유료 토큰을 무제한 태울 수 있다. 파일 업로드만 막아두고
+# 본문 텍스트를 열어두면 제한을 우회하는 셈이라 같이 막는다.
+# 값은 "정상 사용자가 절대 넘지 않을 선"으로 잡았다 — 20분 발표 대본이 한국어 약 6,000자다.
+MAX_SCRIPT_TEXT_LEN = 50_000        # 붙여넣기/파일로 받는 대본 전문
+MAX_SLIDE_SCRIPT_LEN = 20_000       # 슬라이드 한 장 분량
+MAX_OUTLINE_LEN = 5_000             # 목차/가이드라인
+MAX_TOPIC_LEN = 200                 # 발표 주제 (한 줄)
+MAX_AUDIENCE_LEN = 100              # 발표 대상 (예: "교수님", "면접관")
+MAX_EXTRA_REQUIREMENT_LEN = 1_000   # 추가 요구사항 자유 텍스트
+MAX_PROJECT_NAME_LEN = 200
+# 발표 시간은 생성할 대본 분량을 좌우한다 = 토큰 비용에 직결된다.
+MAX_PRESENTATION_MINUTES = 180
 
 # /api/* 호출 인증 (X-API-Key 헤더). 값이 비어있거나 플레이스홀더면 로컬 개발 편의를 위해 인증을 건너뛴다.
 # 배포 전에는 반드시 실제 값으로 채워야 한다 — 안 그러면 누구나 /api/*를 호출해 외부 API 비용을 유발할 수 있다.
@@ -197,35 +212,35 @@ def _compiled_script_text(project: "models.Project", only_scripted: bool = True)
 # 📦 프론트엔드와 통신할 데이터 모델 (JSON 바디 정의)
 # ==========================================
 class FullScriptRequest(BaseModel):
-    project_id: int
-    presentation_time: int
+    project_id: int = Field(..., ge=1)
+    presentation_time: int = Field(..., ge=1, le=MAX_PRESENTATION_MINUTES)
     style: Literal["격식체", "편안한 말투"]
-    extra_requirement: Optional[str] = ""
-    audience: Optional[str] = ""  # 발표 대상/청중 (피그마 '대상' 필드, 예: 교수님/면접관). 선택 입력.
-    topic: Optional[str] = ""  # 발표 주제. 비우면 프로젝트에 저장된 주제(생성 시 입력)를 사용한다.
+    extra_requirement: Optional[str] = Field("", max_length=MAX_EXTRA_REQUIREMENT_LEN)
+    audience: Optional[str] = Field("", max_length=MAX_AUDIENCE_LEN)  # 발표 대상/청중 (피그마 '대상' 필드, 예: 교수님/면접관). 선택 입력.
+    topic: Optional[str] = Field("", max_length=MAX_TOPIC_LEN)  # 발표 주제. 비우면 프로젝트에 저장된 주제(생성 시 입력)를 사용한다.
 
 class PartialScriptRequest(BaseModel):
-    project_id: int
-    target_slide: int
+    project_id: int = Field(..., ge=1)
+    target_slide: int = Field(..., ge=1)
     style: Literal["격식체", "편안한 말투"]
-    extra_requirement: Optional[str] = ""
-    audience: Optional[str] = ""  # 발표 대상/청중. 선택 입력.
+    extra_requirement: Optional[str] = Field("", max_length=MAX_EXTRA_REQUIREMENT_LEN)
+    audience: Optional[str] = Field("", max_length=MAX_AUDIENCE_LEN)  # 발표 대상/청중. 선택 입력.
 
 class AnalysisRequest(BaseModel):
-    project_id: int
+    project_id: int = Field(..., ge=1)
 
 class SlideUpdateRequest(BaseModel):
     """결과 화면(피그마 05)에서 사용자가 직접 고친 대본을 저장할 때 쓴다. PPT O는 슬라이드별,
     PPT X는 1번 슬라이드(전체 대본 한 덩어리)를 이 API로 저장한다."""
-    script: str  # 사용자가 편집한 대본 본문 (빈 문자열 허용 — 내용을 비우는 것도 편집이다)
-    source_content: Optional[str] = None  # 원문도 함께 고칠 일이 있으면 선택적으로 갱신
+    script: str = Field(..., max_length=MAX_SLIDE_SCRIPT_LEN)  # 사용자가 편집한 대본 본문 (빈 문자열 허용 — 내용을 비우는 것도 편집이다)
+    source_content: Optional[str] = Field(None, max_length=MAX_SCRIPT_TEXT_LEN)  # 원문도 함께 고칠 일이 있으면 선택적으로 갱신
 
 class SlideCreateRequest(BaseModel):
     """슬라이드 추가(피그마 05-1 '슬라이드 추가/삭제 가능'). position이 있으면 그 자리에 끼워넣고
     뒤 슬라이드 번호는 하나씩 밀린다. 없으면 맨 뒤에 붙인다."""
-    position: Optional[int] = None  # 1-based. 이 번호 자리에 삽입. None이면 맨 끝.
-    script: Optional[str] = ""
-    source_content: Optional[str] = ""
+    position: Optional[int] = Field(None, ge=1)  # 1-based. 이 번호 자리에 삽입. None이면 맨 끝.
+    script: Optional[str] = Field("", max_length=MAX_SLIDE_SCRIPT_LEN)
+    source_content: Optional[str] = Field("", max_length=MAX_SCRIPT_TEXT_LEN)
 
 
 def _round_scores_in_place(result: dict):
@@ -268,11 +283,11 @@ def _create_project_from_script(db: Session, name: str, script: str):
 @api.post("/api/projects")
 async def create_project(
     file: UploadFile = File(None),
-    project_name: str = Form(None),
+    project_name: str = Form(None, max_length=MAX_PROJECT_NAME_LEN),
     mode: Literal["script", "coaching"] = Form("script"),
-    topic: str = Form(None),
-    outline: str = Form(None),
-    script_text: str = Form(None),
+    topic: str = Form(None, max_length=MAX_TOPIC_LEN),
+    outline: str = Form(None, max_length=MAX_OUTLINE_LEN),
+    script_text: str = Form(None, max_length=MAX_SCRIPT_TEXT_LEN),
     db: Session = Depends(get_db),
 ):
     """[프로젝트 생성 API] 입력 방식에 따라 새 프로젝트를 만듭니다.
@@ -310,6 +325,16 @@ async def create_project(
 
             if not text:
                 raise HTTPException(status_code=422, detail="파일에서 텍스트를 추출하지 못했습니다.")
+
+            # script_text로 직접 붙여넣는 경로엔 상한이 걸려 있으므로, 파일로 우회해서 같은 내용을
+            # 무제한으로 넣을 수 있으면 안 된다. 20MB짜리 txt는 수백만 자가 되고, 그게 대본으로
+            # 저장되면 이후 생성·분석 호출마다 통째로 HCX 프롬프트에 실린다.
+            # 잘라내지 않고 거절한다 — 조용히 자르면 사용자가 대본 뒷부분이 사라진 걸 모른다.
+            if len(text) > MAX_SCRIPT_TEXT_LEN:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"대본이 너무 깁니다. (최대 {MAX_SCRIPT_TEXT_LEN:,}자, 현재 {len(text):,}자)"
+                )
 
             project = _create_project_from_script(db, project_name or os.path.splitext(file.filename or "project")[0], text)
             return {"success": True, "project_id": project.id, "data": {"metadata": {"topic": None, "keywords": []}, "slides": [{"slide_number": 1, "content": text}]}}

@@ -11,7 +11,8 @@
 | 구조화 로깅 없음 | 중간 | 전부 `print()`. 요청 추적 ID 없음. 운영 중 디버깅 어려움. [RELIABILITY.md](../../RELIABILITY.md) |
 | **핸들러가 `async def`인데 블로킹 I/O를 직접 호출** | 중간(배포 시) | `main.py`의 엔드포인트가 `async def`인데 내부에서 동기 블로킹 호출(`requests.post`, `subprocess.run`, Azure SDK의 `done.wait(timeout=300)`)을 그대로 실행함. FastAPI는 `async def` 라우트를 스레드풀로 오프로드하지 않으므로, 한 요청이 이벤트루프를 잡으면 다른 요청이 멈춤. **부분 해결(2026-07-23)**: 가장 무거운 `/api/script/full`은 `run_in_threadpool`로 오프로드해 루프를 비워 둠. 나머지(`/api/evaluation/audio`의 ffmpeg·Azure, `/api/analysis/words`의 stdict 등)는 아직 `async def`에서 동기 호출 중 → 마저 처리 필요. 수정: 블로킹 핸들러를 `def`로 바꾸거나 `run_in_threadpool`로 감싸고 워커를 여러 개 띄운다. (2026-07-21 Fable5 검토에서 발견) |
 | **업로드 크기 제한이 multipart 파싱 이후에만 적용됨** | 중간(배포 시) | `_save_upload_with_limit`는 1MB씩 스트리밍하며 413을 내지만, 그 함수가 실행되는 시점엔 이미 Starlette/`python-multipart`가 요청 본문 전체를 파싱해 `UploadFile`(디스크로 스필되는 `SpooledTemporaryFile`)에 담아둔 뒤임. ASGI/리버스프록시 레벨의 본문 크기 상한이 없어서, 수 GB 본문을 보내면 413이 뜨기 전에 디스크/메모리가 소진될 수 있음. 수정: 요청 본문 크기를 제한하는 ASGI 미들웨어 추가 또는 프록시에서 차단. (Fable5 검토) |
-| 레이트 리밋/입력 길이 상한 없음 | 중간(배포 시) | 초당 요청 수 제한이 없고, `script_text`/`topic`/`outline`/`extra_requirement`에 `max_length`가 없어 인증된(개발 모드에선 무인증) 호출자가 유료 외부 API(HCX/Azure/ETRI) 비용을 무제한으로 유발 가능. 수정: slowapi 등 레이트리밋 + Pydantic `Field(max_length=...)`. (Fable5 검토) |
+| 레이트 리밋 없음 | 중간(배포 시) | 초당 요청 수 제한이 없어, 인증된(개발 모드에선 무인증) 호출자가 정상 크기 요청을 반복해서 유료 외부 API(HCX/Azure/ETRI) 비용을 유발 가능. **입력 길이 상한은 2026-08-04에 해결됨**(아래 해결 목록 참고) — 요청 1건당 비용은 막혔지만 요청 **횟수**는 아직 안 막혀 있다. 수정: slowapi 등. (Fable5 검토) |
+| 슬라이드 개수 상한 없음 | 낮음~중간(배포 시) | 대본 생성은 슬라이드 한 장당 HCX 호출 1회다. 500페이지 PDF를 올리면 500회 호출이 나간다. 텍스트 길이 상한(2026-08-04)은 장당 분량만 막지 슬라이드 **개수**는 막지 않는다. 파일 크기 20MB 안에서도 충분히 가능. 수정: 프로젝트당 슬라이드 수 상한 + 초과 시 422. (2026-08-04 입력 상한 작업 중 발견) |
 | `(project_id, slide_number)` 유니크 제약 없음 | 낮음~중간 | `Slide`에 유니크 제약이 없어, 동시/재시도 `/api/script/full` 호출이 같은 슬라이드 번호를 각각 새로 insert하면 중복 행이 생길 수 있음. `_compiled_script_text`가 둘 다 이어붙여 대본이 꼬임. 단일 사용자 개발 단계에선 발생 확률 낮아 보류. 수정: 모델에 `UniqueConstraint` 추가(+ dev DB 재생성). (Fable5 검토) |
 | TOON 파서가 줄 첫머리 "숫자," 를 슬라이드 구분자로 오인 가능 | 낮음 | `toon_parser.py`의 lookahead가 "줄바꿈 + 숫자 + 쉼표"를 새 레코드로 봄. 대본 줄이 "1,000명이 참석했습니다"처럼 줄 첫머리에 천단위 숫자로 시작하면 거기서 잘림. 시스템 프롬프트로 쉼표 자제를 유도하지만 강제는 아님. (Fable5 검토) |
 | 대본 생성 잘림(`maxTokens`) 감지 없음 | 낮음~중간 | `maxTokens=2000`에 걸려 마지막 슬라이드가 잘려도 잘림 사유를 확인하지 않고 `success: True`로 저장됨. 수정: API의 finish/stop reason 확인. (생성 슬라이드 수를 원본과 비교하는 쪽은 2026-07-23에 구현됨 — 아래 "슬라이드 유실" 항목 참고) |
@@ -30,6 +31,7 @@
 
 아래는 이미 해결되어 더 이상 부채가 아닙니다. 자세한 내용은 [completed/0001-initial-harness-and-reliability-fixes.md](completed/0001-initial-harness-and-reliability-fixes.md) 참고.
 
+- 입력 길이 상한 없음 → 해결(2026-08-04). `main.py`에 `MAX_*_LEN` 상수를 두고 Pydantic `Field(max_length=/ge=/le=)`와 `Form(max_length=)`로 강제. 커버: `script_text`·`topic`·`outline`·`extra_requirement`·`audience`·`project_name`·슬라이드 `script`/`source_content` 길이, `presentation_time` 범위(1~180분), `project_id`/`target_slide`/`position` 양수. **파일 업로드 우회도 같이 막음** — 코칭용 파일에서 추출한 텍스트가 상한을 넘으면 413(자르지 않고 거절). `tests/test_input_limits.py` 11건으로 고정.
 - PPT 추출 엔드포인트 미연결 → 해결
 - 임시파일 레이스 컨디션 → 해결
 - `azure` 패키지명 네임스페이스 충돌 위험 → 해결
