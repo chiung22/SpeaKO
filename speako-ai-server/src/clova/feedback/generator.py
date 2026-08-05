@@ -117,7 +117,12 @@ def parse_feedback_sections(text):
 
 
 # 프론트가 아이콘을 고를 때 쓰는 분류. 모델이 엉뚱한 값을 쓰면 general로 떨어뜨린다.
-_TIP_KEYS = ("consonant", "ending", "intonation", "speed", "volume")
+# 성량(volume)은 일부러 뺐다. 두 가지 이유가 겹친다.
+#  1) 녹음 음량은 마이크와 입 사이 거리에 좌우돼서 발표자의 실제 목소리 크기를 뜻하지 않는다. (PM 판단)
+#  2) 애초에 우리에겐 성량 데이터가 없다. Azure가 주는 건 정확도·유창성·완성도뿐이라,
+#     성량 팁을 쓰게 두면 근거 없이 지어내는 것이 된다. 이 프로젝트가 "칭찬에도 근거가 필요하다"로
+#     한 번 겪은 문제와 같은 종류다(위 STRONG_WORD_THRESHOLD 주석 참고).
+_TIP_KEYS = ("consonant", "ending", "intonation", "speed")
 
 
 def normalize_practice_tips(tips):
@@ -189,8 +194,10 @@ class PronunciationFeedbackGenerator:
 
         [연습 팁]
         정확히 3줄. 각 줄은 `분류 | 제목 | 설명` 형식으로 쓰세요.
-        분류는 consonant(자음) / ending(끝소리) / intonation(강세·억양) / speed(속도) / volume(성량)
+        분류는 consonant(자음) / ending(끝소리) / intonation(강세·억양) / speed(속도)
         중에서만 고르고, 서로 다른 분류 3개를 쓰세요. 제목은 10자 이내입니다.
+        **목소리 크기(성량)에 대한 조언은 쓰지 마세요.** 녹음 음량은 마이크 거리에 좌우돼서
+        발표자의 실제 성량을 알 수 없고, 주어진 점수에도 성량 정보가 없습니다.
         예) consonant | 명확한 자음 발음 | 'ㄷ, ㅈ, ㅅ' 계열 자음을 더 또렷하게 발음해보세요.
         """
 

@@ -198,6 +198,23 @@ def test_unknown_tip_key_falls_back_to_general():
     assert tips[0]["key"] == "general"
 
 
+def test_speed_is_an_allowed_tip_key():
+    """PM 확정: 속도는 아이콘을 추가해서 쓴다."""
+    from clova.feedback.generator import normalize_practice_tips
+
+    tips = normalize_practice_tips(["speed | 말하기 속도 | 조금 천천히 말해보세요."])
+    assert tips[0]["key"] == "speed"
+
+
+def test_volume_is_not_an_allowed_tip_key():
+    """PM 확정: 성량은 제외. 녹음 음량은 마이크 거리에 좌우되고, 애초에 Azure가 성량 데이터를
+    주지 않아 팁을 쓰면 근거 없이 지어내는 것이 된다."""
+    from clova.feedback.generator import normalize_practice_tips
+
+    tips = normalize_practice_tips(["volume | 목소리 크기 | 조금 더 크게 말해보세요."])
+    assert tips[0]["key"] == "general", "성량이 정식 분류로 통과되고 있습니다"
+
+
 def test_old_cached_string_tips_still_readable(db_session_factory):
     """형식을 바꾸기 전에 캐시된 피드백이 있다. 못 읽으면 지난 평가 화면이 깨진다."""
     project_id = _project_with_script(db_session_factory, "대본")
