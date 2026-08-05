@@ -18,10 +18,12 @@ API 키(ETRI/Azure/Clova Voice) 발급 대기 중 진행 가능한 작업들을 
 | 테스트 | **149건 통과** |
 | 엔드포인트 | 15개 (`src/main.py`) |
 
-**테스트 실행법** — 반드시 venv 파이썬을 쓸 것. 시스템 파이썬엔 pytest가 없습니다:
+**테스트 실행법** — 시스템 파이썬(3.12.2)·venv 둘 다 `requirements-dev.txt`를 설치해 두었으므로 어느 쪽으로 돌려도 됩니다(8/04 실측, 양쪽 149건 통과):
 ```
-cd speako-ai-server && ./venv/Scripts/python.exe -m pytest tests/ -q
+cd speako-ai-server && pytest tests/ -q                      # 시스템 파이썬
+cd speako-ai-server && ./venv/Scripts/python.exe -m pytest tests/ -q   # venv
 ```
+**두 환경 모두 `requirements*.txt` 핀과 정확히 일치합니다** — 15개 핀 전부 대조 확인. 어긋나면 `pip install -r requirements-dev.txt`로 되돌릴 것. pytest만 따로 깔지 말 것(런타임 의존성이 없으면 "모듈 없음"이 "import 에러 149건"으로 바뀔 뿐).
 
 ## 다음에 할 일 (우선순위 순)
 
@@ -44,6 +46,11 @@ cd speako-ai-server && ./venv/Scripts/python.exe -m pytest tests/ -q
 - Figma export 폴더 3개(07-21 / 07-27 / 08-04)를 `docs/figma/UMC 10th_SpeaKO (1)/` 하나로 통합. 겹치면 최신본 우선, 고유 파일 전부 이관 후 나머지 삭제(유실 0 확인). 워킹트리 미커밋 162건 → 0건. (PR #17)
 - [tech-debt-tracker.md](docs/exec-plans/tech-debt-tracker.md)를 실제 코드와 동기화 — 이미 고친 11건이 부채 표에 남아 있어 잔여 작업 판단이 불가능했음. 새 부채 1건(`job_store` 메모리) 추가. (PR #18)
 - 머지 완료된 로컬 브랜치 6개 삭제. **원격 머지 완료 브랜치 8개는 아직 남아 있음** — 사용자에게 삭제 여부 물어본 상태.
+- **의존성 드리프트 정리 + 배포 검증**: venv가 핀과 3건 어긋나 있었음(`pytest` 9.1.1↔8.3.4, `azure-cognitiveservices-speech` 1.50.0↔1.42.0, `python-multipart` 0.0.32↔0.0.20). 셋 다 발음 평가·오디오 업로드 경로라 "로컬만 됨" 사고가 날 자리였음. 깨끗한 venv에 핀 그대로 설치해 149건 통과를 먼저 확인한 뒤 로컬을 핀에 맞춰 내림. `uvicorn[standard]` extras(httptools/watchfiles/websockets/PyYAML)도 로컬에 빠져 있어 함께 복구. CI에 **Docker 빌드·기동 스모크 잡** 추가 — Dockerfile이 깨져도 pytest는 못 잡기 때문.
+  - `eunjeon`은 무관한 것으로 확인: 있으나 없으나 사전 로드에 실패해 양쪽 다 Kiwi 대체 경로를 타고, G2P 출력이 완전히 동일했음(9단어 실측).
+  - `requirements*.txt` 첫 줄 `# -*- coding: utf-8 -*-`는 **지우면 안 됨**. pip 24.0의 `auto_decode`는 BOM/인코딩 선언이 없으면 로케일 인코딩으로 읽는데, 한국어 Windows(cp949)에서 한글 주석 때문에 `UnicodeDecodeError`로 죽는다 — 선언 유무로 실측 확인. CI(우분투/UTF-8)에서는 재현되지 않는다.
+  - 시스템 파이썬에도 `requirements-dev.txt` 설치 완료. 위 인코딩 문제 때문에 이전 설치가 중간에 실패해 있었던 것으로 보임.
+  - **로컬과 컨테이너가 서로 다른 G2P 구현을 탄다** — 로컬(Windows)은 mecab 로드 실패로 Kiwi 대체 경로, 컨테이너는 g2pkk 그대로(부팅 로그의 "Kiwi로 대체" 경고 유무로 구분됨). 9단어 실측 결과 **출력은 완전히 동일**했고, CI docker 잡이 이 값을 고정한다. 발음기호가 배포에서만 달라지면 CI가 실패한다.
 
 ---
 

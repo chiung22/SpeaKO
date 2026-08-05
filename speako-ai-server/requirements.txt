@@ -1,3 +1,6 @@
+# -*- coding: utf-8 -*-
+# 이 줄을 지우지 말 것. pip은 BOM/인코딩 선언이 없으면 파일을 로케일 인코딩으로 읽는데,
+# 한국어 Windows(cp949)에서는 아래 한글 주석 때문에 `pip install -r`이 UnicodeDecodeError로 죽는다.
 fastapi==0.138.2
 uvicorn[standard]==0.49.0
 python-dotenv==1.2.2

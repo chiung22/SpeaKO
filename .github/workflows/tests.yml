@@ -25,3 +25,69 @@ jobs:
 
       - name: Run pytest
         run: pytest tests/ -q
+
+  # 배포 이미지가 실제로 빌드되고 기동되는지 확인한다.
+  # pytest는 TestClient로 앱을 import할 뿐이라 Dockerfile이 깨져도(리눅스 휠 빌드 실패,
+  # ffmpeg 누락, --app-dir 경로 오타 등) 잡지 못한다. 시연 당일에 처음 발견하지 않으려면 필요하다.
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t speako-ai:ci speako-ai-server
+
+      # ffmpeg가 없으면 wav 외 모든 녹음 업로드가 502로 죽는다(Dockerfile 주석 참고).
+      - name: Verify ffmpeg is present
+        run: docker run --rm speako-ai:ci ffmpeg -version
+
+      # API 키가 하나도 없는 상태(=CI)에서도 전 클라이언트가 fallback으로 떠야 한다.
+      - name: Boot container and smoke-test
+        run: |
+          docker run -d --name speako -p 8000:8000 speako-ai:ci
+          booted=""
+          for _ in $(seq 1 60); do
+            if curl -sf -o /dev/null http://127.0.0.1:8000/openapi.json; then
+              booted=1
+              break
+            fi
+            sleep 2
+          done
+          docker logs speako
+          if [ -z "$booted" ]; then
+            echo "::error::컨테이너가 120초 안에 기동하지 못했습니다"
+            exit 1
+          fi
+          # 라우트가 실제로 등록됐는지까지 본다(빈 앱이 200을 주는 경우를 거른다).
+          count=$(curl -sf http://127.0.0.1:8000/openapi.json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["paths"]))')
+          echo "등록된 경로 수: $count"
+          if [ "$count" -lt 12 ]; then
+            echo "::error::경로가 $count개뿐입니다. 12개 이상이어야 합니다"
+            exit 1
+          fi
+
+      # 로컬(Windows)은 mecab 로드에 실패해 Kiwi 대체 경로를 타는데, 컨테이너는 g2pkk를
+      # 그대로 올린다(부팅 로그에 "Kiwi로 대체" 경고가 없음). 경로가 다르면 같은 단어에
+      # 다른 발음기호가 나올 수 있고, 그건 발음 코칭이 배포에서만 틀리는 것을 뜻한다.
+      # 로컬 실측값과 대조해 고정한다.
+      - name: G2P 출력이 로컬과 일치하는지 확인
+        run: |
+          docker exec speako python -c '
+          import json
+          from g2p.g2p_client import G2pConverter
+          expected = {
+              "학교": "[학꾜]", "국물": "[궁물]", "신라": "[실라]",
+              "값어치": "[갑써치]", "맑다": "[막따]", "인공지능": "[인공지능]",
+              "협력": "[혐녁]", "밟다": "[밥따]", "핥아": "[할타]",
+          }
+          got = {r["word"]: r["phoneme"] for r in G2pConverter().convert_words(list(expected))}
+          diff = {w: (expected[w], got.get(w)) for w in expected if got.get(w) != expected[w]}
+          print("컨테이너 G2P:", json.dumps(got, ensure_ascii=False))
+          if diff:
+              raise SystemExit("로컬과 불일치(기대, 실제): " + json.dumps(diff, ensure_ascii=False))
+          print("로컬 실측값과 일치")
+          '
+
+      - name: Tear down
+        if: always()
+        run: docker rm -f speako || true
