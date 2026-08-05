@@ -280,6 +280,27 @@ def _create_project_from_script(db: Session, name: str, script: str):
     return project
 
 
+def _extract_coaching_text(temp_file_path: str, ext: str) -> str:
+    """완성된 대본 파일(DOCX/TXT/PDF) → 전체 텍스트. 동기 블로킹(디스크 + 파싱)이라 스레드풀에서 부른다."""
+    if ext == ".pdf":
+        return pdf_extractor.extract_full_text(temp_file_path)
+    if ext == ".docx":
+        return docx_extractor.extract_full_text(temp_file_path)
+    with open(temp_file_path, "rb") as f:
+        return f.read().decode("utf-8", errors="ignore")
+
+
+def _extract_slide_data(temp_file_path: str, ext: str, topic_hint: str, outline_hint: str) -> dict:
+    """슬라이드 파일(PPTX/PDF) → 구조화 데이터. 동기 블로킹이라 스레드풀에서 부른다.
+
+    PPTX 경로는 이미지 전용 장표를 만나면 **HCX 비전을 유료로 호출**한다(슬라이드당 최대 3장).
+    네트워크 왕복이 여러 번 일어나므로 이벤트 루프에서 직접 돌리면 안 된다.
+    """
+    if ext == ".pdf":
+        return pdf_extractor.extract_structured_data(temp_file_path)
+    return ppt_extractor.extract_structured_data(temp_file_path, topic_hint=topic_hint, outline_hint=outline_hint)
+
+
 @api.post("/api/projects")
 async def create_project(
     file: UploadFile = File(None),
@@ -306,17 +327,13 @@ async def create_project(
     if file is not None and mode == "coaching":
         temp_file_path = _safe_temp_path(file.filename)
         try:
-            _save_upload_with_limit(file, temp_file_path, MAX_PPT_SIZE_BYTES, ALLOWED_COACHING_EXTENSIONS)
+            await run_in_threadpool(
+                _save_upload_with_limit, file, temp_file_path, MAX_PPT_SIZE_BYTES, ALLOWED_COACHING_EXTENSIONS
+            )
 
             ext = os.path.splitext(file.filename or "")[1].lower()
             try:
-                if ext == ".pdf":
-                    text = pdf_extractor.extract_full_text(temp_file_path)
-                elif ext == ".docx":
-                    text = docx_extractor.extract_full_text(temp_file_path)
-                else:
-                    with open(temp_file_path, "rb") as f:
-                        text = f.read().decode("utf-8", errors="ignore")
+                text = await run_in_threadpool(_extract_coaching_text, temp_file_path, ext)
             except Exception as e:
                 # 손상되었거나 확장자만 바꾼 파일 등 — 라이브러리 예외를 그대로 500으로 내보내지 않고 422로 정직하게 알린다.
                 print(f"❌ 코칭용 파일 파싱 실패({ext}): {e}")
@@ -345,14 +362,15 @@ async def create_project(
     if file is not None:
         temp_file_path = _safe_temp_path(file.filename)
         try:
-            _save_upload_with_limit(file, temp_file_path, MAX_PPT_SIZE_BYTES, ALLOWED_PPT_EXTENSIONS)
+            await run_in_threadpool(
+                _save_upload_with_limit, file, temp_file_path, MAX_PPT_SIZE_BYTES, ALLOWED_PPT_EXTENSIONS
+            )
 
             ext = os.path.splitext(file.filename or "")[1].lower()
             try:
-                if ext == ".pdf":
-                    result = pdf_extractor.extract_structured_data(temp_file_path)
-                else:
-                    result = ppt_extractor.extract_structured_data(temp_file_path, topic_hint=topic or "", outline_hint=outline or "")
+                result = await run_in_threadpool(
+                    _extract_slide_data, temp_file_path, ext, topic or "", outline or ""
+                )
             except Exception as e:
                 print(f"❌ 슬라이드 파일 파싱 실패({ext}): {e}")
                 raise HTTPException(status_code=422, detail="파일을 열 수 없습니다. 파일이 손상되지 않았는지 확인해주세요.")
@@ -536,17 +554,12 @@ async def create_partial_script(request: PartialScriptRequest, db: Session = Dep
 
     return {"success": True, "project_id": project.id, "data": result}
 
-@api.post("/api/analysis/words")
-async def extract_and_convert_words(request: AnalysisRequest, db: Session = Depends(get_db)):
-    """[발음 주의 단어 추출 및 G2P 변환 API] project_id의 생성된 대본을 분석 대상으로 삼는다."""
-    project = db.get(models.Project, request.project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다.")
+def _analyze_difficult_words(script_text: str):
+    """대본 → (발음 주의 단어 목록, 카테고리별 집계).
 
-    script_text = _compiled_script_text(project)
-    if not script_text:
-        raise HTTPException(status_code=422, detail="먼저 /api/script/full로 전체 대본을 생성해주세요.")
-
+    전부 동기 블로킹이다 — 형태소 분석은 CPU를 잡고, ETRI와 표준국어대사전은 HTTP를 친다.
+    그래서 `async def` 핸들러에서 직접 부르지 말고 반드시 `run_in_threadpool`로 감쌀 것.
+    """
     # "Slide N:" 라벨은 대본 내용이 아니므로 분석 전에 떼어낸다 (안 그러면 "Slide"가 외국어로 잡힘).
     analysis_text = re.sub(r"Slide \d+:", " ", script_text)
 
@@ -566,10 +579,10 @@ async def extract_and_convert_words(request: AnalysisRequest, db: Session = Depe
         print(f"⚠️ 발음 주의 단어가 {len(extracted_words)}개라 상한({MAX_DIFFICULT_WORDS}개)까지만 분석합니다.")
         extracted_words = extracted_words[:MAX_DIFFICULT_WORDS]
 
-    # 2. G2P 모듈로 발음 기호 획득
+    # G2P 모듈로 발음 기호 획득
     final_result = g2p_converter.convert_words(extracted_words)
 
-    # 3. 장단음/연음/표기-발음불일치 카테고리 분류 (하이라이트용)
+    # 장단음/연음/표기-발음불일치 카테고리 분류 (하이라이트용)
     summary = {category: 0 for category in DIFFICULT_WORD_CATEGORIES}
     words_payload = []
     for item in final_result:
@@ -578,7 +591,25 @@ async def extract_and_convert_words(request: AnalysisRequest, db: Session = Depe
             summary[category] += 1
         words_payload.append({**item, "category": category})
 
-    # 4. 이 프로젝트의 기존 단어 목록을 최신 결과로 교체 (현재 대본 기준 스냅샷)
+    return words_payload, summary
+
+
+@api.post("/api/analysis/words")
+async def extract_and_convert_words(request: AnalysisRequest, db: Session = Depends(get_db)):
+    """[발음 주의 단어 추출 및 G2P 변환 API] project_id의 생성된 대본을 분석 대상으로 삼는다."""
+    project = db.get(models.Project, request.project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다.")
+
+    script_text = _compiled_script_text(project)
+    if not script_text:
+        raise HTTPException(status_code=422, detail="먼저 /api/script/full로 전체 대본을 생성해주세요.")
+
+    # 형태소 분석(CPU) + ETRI/표준국어대사전 HTTP가 전부 동기 호출이라 스레드풀로 넘긴다.
+    # 단어 40개면 사전 조회만 40번이라, 루프에서 직접 돌리면 그동안 다른 요청이 전부 멈춘다.
+    words_payload, summary = await run_in_threadpool(_analyze_difficult_words, script_text)
+
+    # 이 프로젝트의 기존 단어 목록을 최신 결과로 교체 (현재 대본 기준 스냅샷)
     db.query(models.DifficultWord).filter(models.DifficultWord.project_id == project.id).delete()
     for item in words_payload:
         db.add(models.DifficultWord(project_id=project.id, word=item["word"], phoneme=item["phoneme"], category=item["category"]))
@@ -607,7 +638,9 @@ async def evaluate_pronunciation(
     wav_file_path = None
     try:
         # 업로드된 파일을 로컬 디스크에 임시 복사 (크기/타입 제한 적용)
-        _save_upload_with_limit(audio_file, temp_file_path, MAX_AUDIO_SIZE_BYTES, ALLOWED_AUDIO_EXTENSIONS)
+        await run_in_threadpool(
+            _save_upload_with_limit, audio_file, temp_file_path, MAX_AUDIO_SIZE_BYTES, ALLOWED_AUDIO_EXTENSIONS
+        )
 
         project = db.get(models.Project, project_id)
         if not project:
@@ -635,7 +668,10 @@ async def evaluate_pronunciation(
         audio_path_for_evaluation = temp_file_path
         if os.path.splitext(audio_file.filename or "")[1].lower() != ".wav":
             wav_file_path = _safe_temp_path("converted.wav")
-            if not audio_converter.convert_to_wav(temp_file_path, wav_file_path):
+            # ffmpeg는 subprocess.run으로 완료까지 블로킹한다. 10MB 녹음이면 초 단위가 걸리므로
+            # 루프에서 직접 돌리면 그동안 서버 전체가 멈춘 것처럼 보인다.
+            converted = await run_in_threadpool(audio_converter.convert_to_wav, temp_file_path, wav_file_path)
+            if not converted:
                 raise HTTPException(status_code=502, detail="오디오 파일을 변환하지 못했습니다. 파일이 손상되지 않았는지 확인해주세요.")
             audio_path_for_evaluation = wav_file_path
 
