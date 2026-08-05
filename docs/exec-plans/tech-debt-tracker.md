@@ -9,7 +9,7 @@
 | DB 마이그레이션 도구 없음 | 낮음(완화됨) | `Base.metadata.create_all()`은 없는 테이블만 만들고 기존 테이블에 컬럼을 못 붙인다. **완화(2026-08-04)**: `db/database.py`의 `_add_missing_columns()`가 `_EXPECTED_COLUMNS`와 실제 스키마를 비교해 빠진 컬럼만 `ALTER TABLE ADD COLUMN` 해준다(현재 `pronunciation_evaluations`의 `feedback`/`reference_text`/`recognized_text`/`slide_number`). 컬럼 **추가**만 커버하고 타입 변경·삭제·백필은 못 하므로, 스키마 변경이 잦아지면 Alembic 도입 검토. [db-schema.md](../generated/db-schema.md) |
 | `slides.script`에 버전 이력 없음 | 낮음 | 전체 생성/부분 재생성 둘 다 같은 컬럼을 덮어써서, 재생성 전 대본으로 되돌릴 방법이 없음. 필요해지면 별도 이력 테이블 검토. |
 | 구조화 로깅 없음 | 중간 | 전부 `print()`. 요청 추적 ID 없음. 운영 중 디버깅 어려움. [RELIABILITY.md](../../RELIABILITY.md) |
-| **핸들러가 `async def`인데 블로킹 I/O를 직접 호출** | 중간(배포 시) | `main.py`의 엔드포인트가 `async def`인데 내부에서 동기 블로킹 호출(`requests.post`, `subprocess.run`, Azure SDK의 `done.wait(timeout=300)`)을 그대로 실행함. FastAPI는 `async def` 라우트를 스레드풀로 오프로드하지 않으므로, 한 요청이 이벤트루프를 잡으면 다른 요청이 멈춤. **부분 해결(2026-07-23)**: 가장 무거운 `/api/script/full`은 `run_in_threadpool`로 오프로드해 루프를 비워 둠. 나머지(`/api/evaluation/audio`의 ffmpeg·Azure, `/api/analysis/words`의 stdict 등)는 아직 `async def`에서 동기 호출 중 → 마저 처리 필요. 수정: 블로킹 핸들러를 `def`로 바꾸거나 `run_in_threadpool`로 감싸고 워커를 여러 개 띄운다. (2026-07-21 Fable5 검토에서 발견) |
+| ~~핸들러가 `async def`인데 블로킹 I/O를 직접 호출~~ | — | **해결(2026-08-04)**. 아래 해결 목록 참고. |
 | **업로드 크기 제한이 multipart 파싱 이후에만 적용됨** | 중간(배포 시) | `_save_upload_with_limit`는 1MB씩 스트리밍하며 413을 내지만, 그 함수가 실행되는 시점엔 이미 Starlette/`python-multipart`가 요청 본문 전체를 파싱해 `UploadFile`(디스크로 스필되는 `SpooledTemporaryFile`)에 담아둔 뒤임. ASGI/리버스프록시 레벨의 본문 크기 상한이 없어서, 수 GB 본문을 보내면 413이 뜨기 전에 디스크/메모리가 소진될 수 있음. 수정: 요청 본문 크기를 제한하는 ASGI 미들웨어 추가 또는 프록시에서 차단. (Fable5 검토) |
 | 레이트 리밋 없음 | 중간(배포 시) | 초당 요청 수 제한이 없어, 인증된(개발 모드에선 무인증) 호출자가 정상 크기 요청을 반복해서 유료 외부 API(HCX/Azure/ETRI) 비용을 유발 가능. **입력 길이 상한은 2026-08-04에 해결됨**(아래 해결 목록 참고) — 요청 1건당 비용은 막혔지만 요청 **횟수**는 아직 안 막혀 있다. 수정: slowapi 등. (Fable5 검토) |
 | 슬라이드 개수 상한 없음 | 낮음~중간(배포 시) | 대본 생성은 슬라이드 한 장당 HCX 호출 1회다. 500페이지 PDF를 올리면 500회 호출이 나간다. 텍스트 길이 상한(2026-08-04)은 장당 분량만 막지 슬라이드 **개수**는 막지 않는다. 파일 크기 20MB 안에서도 충분히 가능. 수정: 프로젝트당 슬라이드 수 상한 + 초과 시 422. (2026-08-04 입력 상한 작업 중 발견) |
@@ -31,6 +31,9 @@
 
 아래는 이미 해결되어 더 이상 부채가 아닙니다. 자세한 내용은 [completed/0001-initial-harness-and-reliability-fixes.md](completed/0001-initial-harness-and-reliability-fixes.md) 참고.
 
+- 핸들러가 `async def`인데 블로킹 I/O를 직접 호출 → 해결(2026-08-04). 남아 있던 동기 호출을 전부 `run_in_threadpool`로 넘겼다: `/api/analysis/words`(형태소 분석 CPU + ETRI·표준국어대사전 HTTP → `_analyze_difficult_words`로 묶어서 오프로드), `/api/evaluation/audio`(ffmpeg `subprocess.run` + 업로드 저장), `/api/projects`(PPTX/PDF/DOCX 추출 — **PPTX는 이미지 장표에서 HCX 비전을 유료 호출**하므로 네트워크 왕복이 여럿, + 업로드 저장). Azure 평가와 `/api/script/*`는 이전 라운드에 이미 처리됨.
+  - `tests/test_blocking_offload.py` 9건으로 고정. 기능 테스트는 오프로드를 되돌려도 그대로 통과하므로(응답이 같음), 블로킹 함수 안에서 `asyncio.get_running_loop()`가 **실패해야** 정상이라는 방식으로 "어느 스레드에서 돌았는가"를 직접 본다. 오프로드를 지우면 실제로 깨지는 것까지 확인함.
+  - 핸들러가 `def`로 바뀌면 FastAPI가 통째로 스레드풀에 넣어 이 검증이 항상 통과하게 되므로, 대상 핸들러가 `async def`로 남아 있는지도 같이 고정한다.
 - 입력 길이 상한 없음 → 해결(2026-08-04). `main.py`에 `MAX_*_LEN` 상수를 두고 Pydantic `Field(max_length=/ge=/le=)`와 `Form(max_length=)`로 강제. 커버: `script_text`·`topic`·`outline`·`extra_requirement`·`audience`·`project_name`·슬라이드 `script`/`source_content` 길이, `presentation_time` 범위(1~180분), `project_id`/`target_slide`/`position` 양수. **파일 업로드 우회도 같이 막음** — 코칭용 파일에서 추출한 텍스트가 상한을 넘으면 413(자르지 않고 거절). `tests/test_input_limits.py` 11건으로 고정.
 - PPT 추출 엔드포인트 미연결 → 해결
 - 임시파일 레이스 컨디션 → 해결
