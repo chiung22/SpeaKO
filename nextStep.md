@@ -15,7 +15,7 @@ API 키(ETRI/Azure/Clova Voice) 발급 대기 중 진행 가능한 작업들을 
 | 작업 디렉터리 | `c:\Users\송치웅\Desktop\Project\SpeaKO` (AI 서버는 `speako-ai-server/`) |
 | 브랜치 | `main` (워킹트리 깨끗함, 로컬 브랜치 main 하나) |
 | 최신 커밋 | `ac8754e` (PR #18 머지) |
-| 테스트 | **169건 통과** |
+| 테스트 | **187건 통과** |
 | 엔드포인트 | 15개 (`src/main.py`) |
 
 **테스트 실행법** — 시스템 파이썬(3.12.2)·venv 둘 다 `requirements-dev.txt`를 설치해 두었으므로 어느 쪽으로 돌려도 됩니다(8/04 실측, 양쪽 149건 통과):
@@ -31,9 +31,14 @@ cd speako-ai-server && ./venv/Scripts/python.exe -m pytest tests/ -q   # venv
 
 1. ~~**입력 길이 상한 추가**~~ — **완료(8/04)**. `MAX_*_LEN` 상수 + `Field`/`Form` 검증으로 강제하고, 코칭 파일 업로드로 우회하는 경로(추출 텍스트가 상한 초과 시 413)까지 막음. `tests/test_input_limits.py` 11건. 남은 비용 벡터 2개는 tech-debt-tracker에 등록: **레이트 리밋**(요청 횟수), **슬라이드 개수 상한**(장당 HCX 1회라 500페이지 PDF = 500회).
 2. ~~**블로킹 I/O 오프로드 마무리**~~ — **완료(8/04)**. `/api/analysis/words`·`/api/evaluation/audio`(ffmpeg)·`/api/projects`(PPTX/PDF/DOCX 추출, PPTX는 HCX 비전 유료 호출 포함)의 동기 호출을 전부 `run_in_threadpool`로 넘김. `tests/test_blocking_offload.py` 9건 — 기능 테스트로는 회귀를 못 잡으므로 "블로킹 함수가 이벤트 루프 스레드에서 돌면 실패"하는 방식으로 고정.
-3. **업로드 본문 크기 상한** — `_save_upload_with_limit`는 413을 내지만, 그 시점엔 이미 multipart 전체가 파싱된 뒤. ASGI 미들웨어 또는 프록시 레벨 차단 필요.
-4. **레이트 리밋** (slowapi 등).
-5. **`job_store` 외부화** — 지금은 프로세스 메모리라 워커 2개 이상이면 폴링이 404. 단일 워커 전제로 배포하거나 Redis/DB로 옮겨야 함.
+3. ~~**업로드 본문 크기 상한**~~ — **완료(8/04)**. `utils/body_limit.py`가 라우팅·파싱 전에 끊음(기본 25MB). 실서버에 26MB 보내 413 확인.
+4. ~~**레이트 리밋**~~ — **완료(8/04)**. `utils/rate_limit.py`. 유료 API POST는 분당 60건, 나머지 300건. **폴링과 CORS preflight는 제외**(걸리면 정상 흐름이 깨짐). 실서버에서 60건 통과 → 429 확인.
+5. ~~**`job_store` 외부화**~~ — **완료(8/04)**. `script_jobs` 테이블로 이전. 워커 수 제약 해소. 재시작 시 중단된 작업은 부팅 때 실패로 정리(`fail_stale_jobs`).
+
+**남은 것** — 우선순위 목록은 비었습니다. 다음 후보는 tech-debt-tracker 표 참고:
+- **레이트 리밋이 아직 프로세스 메모리** — 워커를 늘리면 실효 상한이 워커 수만큼 늘어남. 지금은 단일 워커라 문제없음.
+- 스프링이 `X-Forwarded-For`를 넘겨주는지 확인 필요 — 안 넘기면 IP 제한이 전역 상한처럼 동작함(기본값을 넉넉히 잡아둠).
+- 인증/인가(계정 기반), 구조화 로깅, `(project_id, slide_number)` 유니크 제약.
 
 ## 건드리지 말 것 / 대기 중
 

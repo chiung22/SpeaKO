@@ -10,14 +10,15 @@
 | `slides.script`에 버전 이력 없음 | 낮음 | 전체 생성/부분 재생성 둘 다 같은 컬럼을 덮어써서, 재생성 전 대본으로 되돌릴 방법이 없음. 필요해지면 별도 이력 테이블 검토. |
 | 구조화 로깅 없음 | 중간 | 전부 `print()`. 요청 추적 ID 없음. 운영 중 디버깅 어려움. [RELIABILITY.md](../../RELIABILITY.md) |
 | ~~핸들러가 `async def`인데 블로킹 I/O를 직접 호출~~ | — | **해결(2026-08-04)**. 아래 해결 목록 참고. |
-| **업로드 크기 제한이 multipart 파싱 이후에만 적용됨** | 중간(배포 시) | `_save_upload_with_limit`는 1MB씩 스트리밍하며 413을 내지만, 그 함수가 실행되는 시점엔 이미 Starlette/`python-multipart`가 요청 본문 전체를 파싱해 `UploadFile`(디스크로 스필되는 `SpooledTemporaryFile`)에 담아둔 뒤임. ASGI/리버스프록시 레벨의 본문 크기 상한이 없어서, 수 GB 본문을 보내면 413이 뜨기 전에 디스크/메모리가 소진될 수 있음. 수정: 요청 본문 크기를 제한하는 ASGI 미들웨어 추가 또는 프록시에서 차단. (Fable5 검토) |
-| 레이트 리밋 없음 | 중간(배포 시) | 초당 요청 수 제한이 없어, 인증된(개발 모드에선 무인증) 호출자가 정상 크기 요청을 반복해서 유료 외부 API(HCX/Azure/ETRI) 비용을 유발 가능. **입력 길이 상한은 2026-08-04에 해결됨**(아래 해결 목록 참고) — 요청 1건당 비용은 막혔지만 요청 **횟수**는 아직 안 막혀 있다. 수정: slowapi 등. (Fable5 검토) |
-| 슬라이드 개수 상한 없음 | 낮음~중간(배포 시) | 대본 생성은 슬라이드 한 장당 HCX 호출 1회다. 500페이지 PDF를 올리면 500회 호출이 나간다. 텍스트 길이 상한(2026-08-04)은 장당 분량만 막지 슬라이드 **개수**는 막지 않는다. 파일 크기 20MB 안에서도 충분히 가능. 수정: 프로젝트당 슬라이드 수 상한 + 초과 시 422. (2026-08-04 입력 상한 작업 중 발견) |
+| ~~업로드 크기 제한이 multipart 파싱 이후에만 적용됨~~ | — | **해결(2026-08-04)**. 아래 해결 목록 참고. |
+| ~~레이트 리밋 없음~~ | — | **해결(2026-08-04)**. 아래 해결 목록 참고. |
+| ~~슬라이드 개수 상한 없음~~ | — | **해결(2026-08-04)**. 아래 해결 목록 참고. |
+| 레이트 리밋/작업 상태가 단일 프로세스 전제 | 낮음(현재), 중간(워커 늘리면) | `job_store`는 DB로 옮겼지만(2026-08-04) **레이트 리밋 카운터는 여전히 프로세스 메모리**다. `--workers 2` 이상으로 띄우면 워커별로 각자 세어서 실효 상한이 워커 수만큼 늘어난다. 또 프론트가 스프링을 거쳐 호출하므로 스프링이 `X-Forwarded-For`를 넘겨주지 않으면 IP 기준 제한이 **전역 상한**처럼 동작한다(그래서 기본값을 넉넉히 잡음). 수정: 워커를 늘리게 되면 Redis 등 공용 저장소로. `utils/rate_limit.py` 주석 참고. |
 | `(project_id, slide_number)` 유니크 제약 없음 | 낮음~중간 | `Slide`에 유니크 제약이 없어, 동시/재시도 `/api/script/full` 호출이 같은 슬라이드 번호를 각각 새로 insert하면 중복 행이 생길 수 있음. `_compiled_script_text`가 둘 다 이어붙여 대본이 꼬임. 단일 사용자 개발 단계에선 발생 확률 낮아 보류. 수정: 모델에 `UniqueConstraint` 추가(+ dev DB 재생성). (Fable5 검토) |
 | TOON 파서가 줄 첫머리 "숫자," 를 슬라이드 구분자로 오인 가능 | 낮음 | `toon_parser.py`의 lookahead가 "줄바꿈 + 숫자 + 쉼표"를 새 레코드로 봄. 대본 줄이 "1,000명이 참석했습니다"처럼 줄 첫머리에 천단위 숫자로 시작하면 거기서 잘림. 시스템 프롬프트로 쉼표 자제를 유도하지만 강제는 아님. (Fable5 검토) |
 | 대본 생성 잘림(`maxTokens`) 감지 없음 | 낮음~중간 | `maxTokens=2000`에 걸려 마지막 슬라이드가 잘려도 잘림 사유를 확인하지 않고 `success: True`로 저장됨. 수정: API의 finish/stop reason 확인. (생성 슬라이드 수를 원본과 비교하는 쪽은 2026-07-23에 구현됨 — 아래 "슬라이드 유실" 항목 참고) |
 | **슬라이드가 많으면 `/api/script/full` 한 요청이 오래 걸림** | 중간(배포 시) | 정렬 보장을 위해 슬라이드 한 장씩 생성한다. **1단계 완화(2026-07-23)**: 슬라이드별 호출이 독립적이라 동시 실행으로 병렬화(`ThreadPoolExecutor`, 동시 상한 `HCX_MAX_CONCURRENCY` 기본 4) + `run_in_threadpool` 오프로드. **실측: AHP 19장 순차 ≈ 80~95초 → 병렬 24.7초(≈3.5배).** 그래도 30장+면 수십 초라 느린 네트워크·프록시 idle 타임아웃엔 여전히 취약. **2단계 완료(2026-08-04)**: 백그라운드 작업으로 전환. `POST /api/script/full`이 202 + `job_id`를 즉시 반환하고 `GET /api/script/jobs/{job_id}`로 폴링한다(`utils/job_store.py`, `ThreadPoolExecutor`). 프록시 idle 타임아웃 문제는 이걸로 해소됨. 다만 **작업 상태가 프로세스 메모리에 있어서 워커를 2개 이상 띄우면 깨진다**(아래 별도 행 참고). "12/30" 진행률은 아직 미제공(상태는 processing/completed/failed 3종). |
-| **작업 상태(job_store)가 프로세스 메모리에 있음** | 중간(배포 시) | `utils/job_store.py`가 dict + `threading.Lock`이라 (1) `--workers 2` 이상이면 접수한 워커와 폴링받는 워커가 달라 404가 나고 (2) 재시작하면 진행 중 작업이 증발한다. 지금은 단일 워커 전제(`Dockerfile`에 주석으로 명시). 수정: Redis 등 외부 저장소 또는 DB 테이블로 이전. (2026-08-04) |
+| ~~작업 상태(job_store)가 프로세스 메모리에 있음~~ | — | **해결(2026-08-04)**. 아래 해결 목록 참고. |
 | 로컬 헬퍼 스크립트(`src/_*.py`)와 실제 API의 이중 파이프라인 | 낮음 | `run_pipeline_test.py`/`_batch_generate_and_refine.py` 등은 `script_storage.py`로 `projects/<name>/scripts/`에 파일로 저장하는 옛 구조를 씀. 실제 API는 DB에 저장. `script_storage.py`는 `main.py`가 안 씀(고아). 로컬 디버깅 전용임을 명시하거나 정리 필요. (Fable5 검토) |
 | 카테고리 분류 정확도 한계 | 낮음~중간 | 장단음은 표준국어대사전 검색 첫 결과만 대표로 씀 — 동음이의어 의미 중의성(문맥상 어떤 뜻인지)은 해소 안 함. 연음은 "받침+무초성 음절" 구조만 보는 휴리스틱이라, 실제로는 구개음화 등 다른 음운 현상인 경우도 연음으로 분류될 수 있음(예: "굳이"→"구지"는 구개음화지만 구조상 연음 패턴과 같아 연음으로 분류됨). `utils/stdict_client.py`, `utils/hangul_phonology.py` 참고. |
 | ETRI_API_KEY 미발급 | 낮음(완화됨) | 문의 답변 대기 중이나, **Kiwi(kiwipiepy) 로컬 형태소 분석기로 대체**해서 키 없이도 실사용 품질로 동작함(2026-07-22). 단어 추출 체인이 ETRI(키 있을 때) → Kiwi(현재 주력) → 빈도 휴리스틱(방어) 순이라, 나중에 ETRI 키가 발급되면 그냥 키만 넣으면 ETRI가 우선한다. Kiwi가 ETRI와 완전히 동일한 정확도를 보장하진 않지만(태그셋/학습데이터 상이), 여기서 필요한 "명사/고유명사/외국어 2글자+ 추출"은 관대한 과제라 실질 차이가 작고, 오히려 조사 제거·단일글자 처리는 기존 빈도 폴백보다 나음. `nlp/kiwi_analyzer.py` |
@@ -31,6 +32,10 @@
 
 아래는 이미 해결되어 더 이상 부채가 아닙니다. 자세한 내용은 [completed/0001-initial-harness-and-reliability-fixes.md](completed/0001-initial-harness-and-reliability-fixes.md) 참고.
 
+- 업로드 크기 제한이 multipart 파싱 이후에만 적용됨 → 해결(2026-08-04). `utils/body_limit.py`의 `MaxBodySizeMiddleware`가 라우팅·파싱 전에 끊는다. `Content-Length`가 상한(기본 25MB, `MAX_REQUEST_BODY_MB`)을 넘으면 **본문을 한 바이트도 받기 전에** 413. 헤더가 없거나 거짓일 수 있으므로 실제 흘러온 바이트도 세다가 넘으면 연결을 끊는다. 실서버에 26MB를 실제로 보내 413 확인.
+- 레이트 리밋 없음 → 해결(2026-08-04). `utils/rate_limit.py`. 유료 API를 태우는 POST(`/api/projects`·`/api/script/*`·`/api/analysis/*`·`/api/evaluation/*`)는 분당 60건(`RATE_LIMIT_EXPENSIVE_PER_MINUTE`), 나머지는 300건(`RATE_LIMIT_PER_MINUTE`). **폴링(`GET /api/script/jobs/{id}`)과 CORS preflight는 유료 등급에서 제외** — 프론트가 1~2초마다 폴링하므로 여기 걸리면 정상 흐름이 깨진다. 429에 `Retry-After` 포함. slowapi를 쓰지 않은 이유는 모듈 주석 참고(기본 저장소가 똑같이 인메모리라 단일 워커에선 차이가 없음). 실서버에서 60건 통과 → 429 확인.
+- 슬라이드 개수 상한 없음 → 해결(2026-08-04). `MAX_SLIDES_PER_PROJECT`(기본 100) 초과 시 413.
+- 작업 상태(job_store)가 프로세스 메모리에 있음 → 해결(2026-08-04). `script_jobs` 테이블(`db/models.ScriptJob`)로 이전. dict → DB로 바꾸면서 워커 수 제약이 사라졌다. 다만 **작업을 돌리는 스레드풀은 여전히 프로세스 안**이라, 재시작하면 그때 `processing`이던 작업은 아무도 이어받지 않는다 → 부팅 시 `fail_stale_jobs()`가 30분 이상 묵은 `processing`을 실패로 정리한다(안 그러면 프론트가 영원히 폴링한다).
 - 핸들러가 `async def`인데 블로킹 I/O를 직접 호출 → 해결(2026-08-04). 남아 있던 동기 호출을 전부 `run_in_threadpool`로 넘겼다: `/api/analysis/words`(형태소 분석 CPU + ETRI·표준국어대사전 HTTP → `_analyze_difficult_words`로 묶어서 오프로드), `/api/evaluation/audio`(ffmpeg `subprocess.run` + 업로드 저장), `/api/projects`(PPTX/PDF/DOCX 추출 — **PPTX는 이미지 장표에서 HCX 비전을 유료 호출**하므로 네트워크 왕복이 여럿, + 업로드 저장). Azure 평가와 `/api/script/*`는 이전 라운드에 이미 처리됨.
   - `tests/test_blocking_offload.py` 9건으로 고정. 기능 테스트는 오프로드를 되돌려도 그대로 통과하므로(응답이 같음), 블로킹 함수 안에서 `asyncio.get_running_loop()`가 **실패해야** 정상이라는 방식으로 "어느 스레드에서 돌았는가"를 직접 본다. 오프로드를 지우면 실제로 깨지는 것까지 확인함.
   - 핸들러가 `def`로 바뀌면 FastAPI가 통째로 스레드풀에 넣어 이 검증이 항상 통과하게 되므로, 대상 핸들러가 `async def`로 남아 있는지도 같이 고정한다.

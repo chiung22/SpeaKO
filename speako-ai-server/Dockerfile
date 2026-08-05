@@ -26,7 +26,9 @@ ENV PYTHONUNBUFFERED=1 \
 
 EXPOSE 8000
 
-# --workers는 기본 1이다. 지금 대본 생성 작업 상태(job_store)는 프로세스 메모리에 있어서,
-# 워커를 여러 개로 늘리면 생성 상태 조회가 다른 워커로 가서 404가 날 수 있다.
-# 워커를 늘리려면 job_store를 DB 구현으로 먼저 바꿔야 한다.
+# --workers는 기본 1이다.
+# 대본 생성 작업 상태(job_store)는 DB(script_jobs 테이블)로 옮겼으므로 워커를 늘려도
+# 폴링이 404가 나지는 않는다. 다만 레이트 리밋 카운터(utils/rate_limit.py)는 아직
+# 프로세스 메모리라, 워커를 N개로 늘리면 실효 상한이 N배가 된다.
+# 워커를 늘리려면 레이트 리밋을 공용 저장소(Redis 등)로 먼저 옮길 것.
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--app-dir", "src"]
