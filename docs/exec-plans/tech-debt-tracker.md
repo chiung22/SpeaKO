@@ -4,6 +4,9 @@
 
 | 항목 | 영향 | 상세 |
 |---|---|---|
+| **발음기호에 장음 기호(ː)가 없음** | 중간 | 피그마 `Coach View Page-4`(단어 목록)는 `구성 › [구ː성]`처럼 장음 위치를 보여주는데, g2pkk 결과엔 ː가 없어 우리는 `[구성]`을 준다. **장단음으로 분류해놓고 어디를 길게 읽는지 안 알려주면 그 카테고리 자체가 무의미하다.** `stdict_client.has_long_vowel()`이 이미 사전 발음을 조회하므로, 여부(bool) 대신 **위치까지** 받아 phoneme에 합성해야 한다. (2026-08-05 피그마 실측에서 발견) |
+| **단어별 설명 문구가 없음** | 중간 | 피그마 단어 목록은 카테고리 고정 문구가 아니라 **구체적 음운 현상 이름 + 설명**을 보여준다(`특정` → "경음화: 받침 뒤에 오는 예사소리(ㄱ/ㄷ/ㅂ/ㅅ/ㅈ)가 된소리로 바뀌어 발음됩니다"). 지금 `/api/analysis/words`는 `word`/`phoneme`/`category`만 준다. 규칙 판정기(비음화·경음화·유음화·구개음화…)를 만들거나 HCX로 생성해야 함. **피그마의 연음 예시 설명문은 앞뒤가 안 맞는 더미 텍스트이므로 문구가 아니라 형식만 요구사항으로 볼 것.** PM에게 서버 생성 여부 확인 필요. (2026-08-05) |
+| **발음 평가 오답의 텍스트 내 위치(offset) 없음** | 중간 | 피그마 `Feedback Page`는 틀린 부분을 **원본·인식 양쪽에** `#FF7676`으로 강조한다. `words_detail`에 단어별 `error_type`(Omission/Insertion/Mispronunciation)은 있지만 위치가 없어, **같은 단어가 여러 번 나오면 프론트가 어디를 칠할지 정할 수 없다.** Omission은 원본에만·Insertion은 인식에만 존재한다는 것도 구분 필요. 수정: 원본/인식 각각의 문자 오프셋을 응답에 포함. (2026-08-05) |
 | 사용자 계정/소유권 기반 인가 없음 | 중간 | X-API-Key로 "정당한 호출인지"는 걸러지지만(아래 고친 항목 참고), "누가 호출했는지"는 구분 못함. 지금은 유효한 키만 있으면 아무나 `project_id`를 바꿔가며 남의 프로젝트를 조회/수정 가능. 사용자 계정 시스템이 생겨야 근본 해결. [SECURITY.md](../../SECURITY.md) |
 | TTS 엔드포인트 미연결 | 중간 | `ClovaVoiceClient`가 API 라우터에 없음. `run_pipeline_test.py`/`_batch_generate_and_refine.py`에서만 호출됨. **실제 키(`CLOVA_VOICE_CLIENT_ID`/`SECRET`) 없이는 라우터 연결해도 fallback만 나가서 실질적으로 의미가 없음 — 키 발급 전까지는 보류.** [pronunciation-coaching.md](../product-specs/pronunciation-coaching.md) |
 | DB 마이그레이션 도구 없음 | 낮음(완화됨) | `Base.metadata.create_all()`은 없는 테이블만 만들고 기존 테이블에 컬럼을 못 붙인다. **완화(2026-08-04)**: `db/database.py`의 `_add_missing_columns()`가 `_EXPECTED_COLUMNS`와 실제 스키마를 비교해 빠진 컬럼만 `ALTER TABLE ADD COLUMN` 해준다(현재 `pronunciation_evaluations`의 `feedback`/`reference_text`/`recognized_text`/`slide_number`). 컬럼 **추가**만 커버하고 타입 변경·삭제·백필은 못 하므로, 스키마 변경이 잦아지면 Alembic 도입 검토. [db-schema.md](../generated/db-schema.md) |
