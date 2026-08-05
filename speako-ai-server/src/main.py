@@ -34,6 +34,8 @@ from utils import audio_converter
 from utils.text_heuristics import extract_frequent_terms
 from utils.stdict_client import StdictClient
 from utils.hangul_phonology import has_liaison_pattern
+from utils.body_limit import MaxBodySizeMiddleware
+from utils.rate_limit import RateLimitMiddleware
 from db.database import get_db, init_db, SessionLocal
 from db import models
 from utils import job_store
@@ -75,19 +77,13 @@ def _parse_origins(raw: str):
 
 origins = _parse_origins(os.getenv("CORS_ALLOW_ORIGINS", ""))
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,
-    # Vercel 프리뷰 배포는 커밋마다 도메인이 바뀌므로(<프로젝트>-<해시>-<팀>.vercel.app) 정규식으로 함께 허용한다.
-    allow_origin_regex=os.getenv("CORS_ALLOW_ORIGIN_REGEX", r"https://.*\.vercel\.app"),
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 # 업로드 파일 제한 (DoS 방지)
 MAX_PPT_SIZE_BYTES = 20 * 1024 * 1024   # 20MB
 MAX_AUDIO_SIZE_BYTES = 10 * 1024 * 1024  # 10MB
+# 요청 본문 전체의 상한. 가장 큰 허용 파일(PPT 20MB)에 multipart 경계·필드 오버헤드를 더한 값.
+# 파일 단위 제한(_save_upload_with_limit)은 본문이 이미 전부 파싱된 뒤에야 도므로 이것만으론
+# 부족하다 — 그 전에 ASGI 레벨에서 끊는 용도다. (utils/body_limit.py 주석 참고)
+MAX_REQUEST_BODY_BYTES = int(os.getenv("MAX_REQUEST_BODY_MB", "25")) * 1024 * 1024
 ALLOWED_PPT_EXTENSIONS = {".pptx", ".pdf"}
 ALLOWED_COACHING_EXTENSIONS = {".docx", ".txt", ".pdf"}
 # 브라우저 MediaRecorder는 기본적으로 webm/opus(Chrome·Firefox·Edge)나 mp4/m4a(Safari)로 녹음한다.
@@ -109,6 +105,27 @@ MAX_EXTRA_REQUIREMENT_LEN = 1_000   # 추가 요구사항 자유 텍스트
 MAX_PROJECT_NAME_LEN = 200
 # 발표 시간은 생성할 대본 분량을 좌우한다 = 토큰 비용에 직결된다.
 MAX_PRESENTATION_MINUTES = 180
+# 대본 생성은 슬라이드 한 장당 HCX 호출 1회다. 길이 상한은 장당 분량만 막지 개수는 못 막으므로,
+# 500페이지 PDF가 500회 호출로 이어지지 않도록 개수 자체에 상한을 둔다.
+MAX_SLIDES_PER_PROJECT = int(os.getenv("MAX_SLIDES_PER_PROJECT", "100"))
+
+# 미들웨어는 **나중에 추가한 것이 바깥쪽**에 감싸인다(Starlette). CORS를 마지막에 붙여야
+# 본문 크기 초과(413) 응답에도 CORS 헤더가 붙어서 브라우저가 에러 내용을 읽을 수 있다.
+# 순서를 바꾸면 배포 프론트에서 413이 그냥 "네트워크 오류"로 보인다.
+app.add_middleware(MaxBodySizeMiddleware, max_bytes=MAX_REQUEST_BODY_BYTES)
+app.add_middleware(
+    RateLimitMiddleware,
+    enabled=os.getenv("RATE_LIMIT_ENABLED", "1") not in ("0", "false", "False"),
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    # Vercel 프리뷰 배포는 커밋마다 도메인이 바뀌므로(<프로젝트>-<해시>-<팀>.vercel.app) 정규식으로 함께 허용한다.
+    allow_origin_regex=os.getenv("CORS_ALLOW_ORIGIN_REGEX", r"https://.*\.vercel\.app"),
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # /api/* 호출 인증 (X-API-Key 헤더). 값이 비어있거나 플레이스홀더면 로컬 개발 편의를 위해 인증을 건너뛴다.
 # 배포 전에는 반드시 실제 값으로 채워야 한다 — 안 그러면 누구나 /api/*를 호출해 외부 API 비용을 유발할 수 있다.
@@ -169,6 +186,13 @@ stdict_client = StdictClient()
 
 # 5. DB 테이블 생성 (없으면 생성, 있으면 그대로 둠)
 init_db()
+
+# 작업 상태는 DB에 있지만 작업을 돌리는 스레드풀은 프로세스 안에 있다. 서버가 죽으면 그때
+# 'processing'이던 작업은 아무도 이어받지 않으므로, 그대로 두면 프론트가 영원히 폴링한다.
+# 부팅 시 한 번 정리한다.
+_stale_jobs = job_store.fail_stale_jobs()
+if _stale_jobs:
+    print(f"🧹 재시작 전에 중단된 대본 생성 작업 {_stale_jobs}건을 실패로 정리했습니다.")
 
 
 def _fallback_difficult_words(script_text: str, top_n: int = 6) -> list:
@@ -377,6 +401,17 @@ async def create_project(
 
             if not result["slides"]:
                 raise HTTPException(status_code=422, detail="파일에서 텍스트를 추출하지 못했습니다.")
+
+            # 대본 생성은 슬라이드 한 장당 HCX 호출 1회다. 길이 상한은 장당 분량만 막으므로,
+            # 500페이지 PDF를 올리면 20MB 안쪽이어도 500회 호출이 나간다. 개수도 막는다.
+            if len(result["slides"]) > MAX_SLIDES_PER_PROJECT:
+                raise HTTPException(
+                    status_code=413,
+                    detail=(
+                        f"슬라이드가 너무 많습니다. "
+                        f"(최대 {MAX_SLIDES_PER_PROJECT}장, 현재 {len(result['slides'])}장)"
+                    ),
+                )
 
             # 발표 주제는 피그마에서 유일한 필수 입력이다. 사용자가 직접 적어 보낸 topic이 있으면
             # 그것을 최우선으로 저장한다(예전엔 자동 감지 topic으로 덮어써서 사용자 입력이 사라졌다).

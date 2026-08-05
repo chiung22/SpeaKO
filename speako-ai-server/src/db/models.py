@@ -51,6 +51,23 @@ class DifficultWord(Base):
     project = relationship("Project", back_populates="difficult_words")
 
 
+class ScriptJob(Base):
+    """대본 생성 같은 비동기 작업의 진행 상태.
+
+    왜 DB에 두나: 예전엔 프로세스 메모리(dict)에 담았는데, 그러면 (1) 워커를 2개 이상 띄우면
+    접수한 워커와 폴링받는 워커가 달라 404가 나고 (2) 재시작하면 진행 중이던 작업이 증발했다.
+    프론트가 1~2초마다 폴링하는 구조라 둘 다 그대로 사용자에게 드러난다.
+    """
+    __tablename__ = "script_jobs"
+
+    id = Column(String, primary_key=True)  # uuid4().hex (접수번호)
+    status = Column(String, nullable=False, default="processing")  # processing | completed | failed
+    data = Column(JSON, nullable=True)   # 완료 시 결과
+    error = Column(Text, nullable=True)  # 실패 시 사유
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
+
+
 class PronunciationEvaluation(Base):
     __tablename__ = "pronunciation_evaluations"
 
