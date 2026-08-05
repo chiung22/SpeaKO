@@ -46,6 +46,9 @@ class DifficultWord(Base):
     word = Column(String, nullable=False)
     phoneme = Column(JSON, nullable=True)  # G2pConverter 결과
     category = Column(String, nullable=True)  # "장단음" | "연음" | "표기-발음불일치" | None(철자=발음)
+    # 단어 목록 화면에 띄우는 설명(예: "경음화: 받침 뒤에 오는 예사소리가 된소리로 바뀌어 발음됩니다").
+    # 조회할 때마다 다시 만들면 표준국어대사전을 또 때려야 하므로 스냅샷과 함께 저장한다.
+    description = Column(Text, nullable=True)
     created_at = Column(DateTime, default=_utcnow, nullable=False)
 
     project = relationship("Project", back_populates="difficult_words")

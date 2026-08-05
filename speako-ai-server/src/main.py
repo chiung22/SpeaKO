@@ -22,7 +22,12 @@ import hmac
 # 1. 분리해둔 AI 클라이언트 모듈들 임포트
 from clova.full_generation.generator import FullScriptGenerator
 from clova.partial_generation.generator import PartialScriptGenerator
-from clova.feedback.generator import PronunciationFeedbackGenerator, collect_weak_words, collect_strong_words
+from clova.feedback.generator import (
+    PronunciationFeedbackGenerator,
+    collect_weak_words,
+    collect_strong_words,
+    normalize_practice_tips,
+)
 from etri.etri_client import EtriLanguageAnalyzer
 from nlp.kiwi_analyzer import KiwiAnalyzer
 from g2p.g2p_client import G2pConverter
@@ -34,6 +39,7 @@ from utils import audio_converter
 from utils.text_heuristics import extract_frequent_terms
 from utils.stdict_client import StdictClient
 from utils.hangul_phonology import has_liaison_pattern
+from utils import phonology_rules
 from utils.body_limit import MaxBodySizeMiddleware
 from utils.rate_limit import RateLimitMiddleware
 from db.database import get_db, init_db, SessionLocal
@@ -207,7 +213,7 @@ DIFFICULT_WORD_CATEGORIES = ("장단음", "연음", "표기-발음불일치")
 MAX_DIFFICULT_WORDS = 40
 
 
-def _classify_word_category(word: str, is_different: bool):
+def _classify_word_category(word: str, is_different: bool, long_vowel_positions=()):
     """
     발음 주의 단어를 장단음/연음/표기-발음불일치 3가지로 분류한다.
     - 장단음: 표준국어대사전에 등록된 발음에 장음 표시(ː)가 있는 경우.
@@ -216,8 +222,11 @@ def _classify_word_category(word: str, is_different: bool):
     - 연음: (철자≠발음이면서) 받침+무초성 음절 구조가 있어 받침이 다음 음절로 넘어가는 경우.
     - 표기-발음불일치: 위 둘에 해당하지 않는 철자≠발음 (비음화/경음화 등).
     철자=발음이고 장단음도 아니면 분류하지 않는다(None).
+
+    long_vowel_positions는 호출부가 이미 조회해둔 결과를 넘기기 위한 것이다(같은 단어로
+    표준국어대사전을 두 번 때리지 않으려고). 안 넘기면 여기서 직접 조회한다.
     """
-    if stdict_client.has_long_vowel(word):
+    if long_vowel_positions or stdict_client.has_long_vowel(word):
         return "장단음"
     if not is_different:
         return None
@@ -265,6 +274,47 @@ class SlideCreateRequest(BaseModel):
     position: Optional[int] = Field(None, ge=1)  # 1-based. 이 번호 자리에 삽입. None이면 맨 끝.
     script: Optional[str] = Field("", max_length=MAX_SLIDE_SCRIPT_LEN)
     source_content: Optional[str] = Field("", max_length=MAX_SCRIPT_TEXT_LEN)
+
+
+def _attach_error_spans(words_detail, reference_text: str, recognized_text: str) -> None:
+    """단어마다 원본/인식 텍스트 안에서의 위치(문자 오프셋)를 붙인다. 리스트를 제자리에서 수정한다.
+
+    왜 필요한가: 피그마 Feedback Page는 틀린 부분을 **원본과 인식 양쪽에** 강조한다.
+    `error_type`만으로는 같은 단어가 여러 번 나올 때 어느 것을 칠할지 정할 수 없다.
+
+    Azure는 단어를 발화 순서대로 돌려주므로, 각 텍스트를 커서로 훑으며 앞에서부터 맞춰간다.
+    - Omission(빠뜨림): 원본에만 있다 → recognized_span은 None
+    - Insertion(덧붙임): 실제로 말한 것뿐이다 → reference_span은 None
+    찾지 못하면(문장부호·정규화 차이 등) 억지로 맞추지 않고 None으로 둔다 — 엉뚱한 곳을
+    칠하느니 칠하지 않는 편이 낫다.
+    """
+    if not words_detail:
+        return
+
+    reference_text = reference_text or ""
+    recognized_text = recognized_text or ""
+    ref_cursor = 0
+    rec_cursor = 0
+
+    for entry in words_detail:
+        word = (entry.get("word") or "").strip()
+        error_type = entry.get("error_type")
+        entry["reference_span"] = None
+        entry["recognized_span"] = None
+        if not word:
+            continue
+
+        if error_type != "Insertion":
+            found = reference_text.find(word, ref_cursor)
+            if found != -1:
+                entry["reference_span"] = [found, found + len(word)]
+                ref_cursor = found + len(word)
+
+        if error_type != "Omission":
+            found = recognized_text.find(word, rec_cursor)
+            if found != -1:
+                entry["recognized_span"] = [found, found + len(word)]
+                rec_cursor = found + len(word)
 
 
 def _round_scores_in_place(result: dict):
@@ -617,14 +667,25 @@ def _analyze_difficult_words(script_text: str):
     # G2P 모듈로 발음 기호 획득
     final_result = g2p_converter.convert_words(extracted_words)
 
-    # 장단음/연음/표기-발음불일치 카테고리 분류 (하이라이트용)
+    # 장단음/연음/표기-발음불일치 카테고리 분류 (하이라이트용) + 단어 목록에 띄울 설명 문구
     summary = {category: 0 for category in DIFFICULT_WORD_CATEGORIES}
     words_payload = []
     for item in final_result:
-        category = _classify_word_category(item["word"], item.get("is_different", False))
+        word = item["word"]
+        long_vowels = stdict_client.long_vowel_positions(word)
+        category = _classify_word_category(word, item.get("is_different", False), long_vowels)
         if category:
             summary[category] += 1
-        words_payload.append({**item, "category": category})
+
+        # 장단음으로 분류해놓고 어디를 길게 읽는지 안 알려주면 그 카테고리가 무의미하다.
+        # 피그마 단어 목록도 `구성 › [구ː성]`처럼 위치를 보여준다.
+        phoneme = phonology_rules.apply_length_marks(item["phoneme"], long_vowels)
+        words_payload.append({
+            **item,
+            "phoneme": phoneme,
+            "category": category,
+            "description": phonology_rules.describe(word, phoneme, category, long_vowels),
+        })
 
     return words_payload, summary
 
@@ -647,7 +708,10 @@ async def extract_and_convert_words(request: AnalysisRequest, db: Session = Depe
     # 이 프로젝트의 기존 단어 목록을 최신 결과로 교체 (현재 대본 기준 스냅샷)
     db.query(models.DifficultWord).filter(models.DifficultWord.project_id == project.id).delete()
     for item in words_payload:
-        db.add(models.DifficultWord(project_id=project.id, word=item["word"], phoneme=item["phoneme"], category=item["category"]))
+        db.add(models.DifficultWord(
+            project_id=project.id, word=item["word"], phoneme=item["phoneme"],
+            category=item["category"], description=item.get("description"),
+        ))
     db.commit()
 
     return {"success": True, "project_id": project.id, "data": {"words": words_payload, "summary": summary}}
@@ -720,6 +784,9 @@ async def evaluate_pronunciation(
         # 점수는 백엔드에서 소수 1자리(0~100)로 정리해서 내려준다. 프론트는 이 숫자를 그대로 표시만 한다.
         # (0~5점으로 뭉개지 않고 소수점까지 자세히. Azure는 소수 점수를 주고, evaluate_audio는 overall_scores 키로 반환한다.)
         _round_scores_in_place(result)
+        # 틀린 부분을 원본·인식 양쪽에서 강조하려면(피그마 Feedback Page) 단어가 각 텍스트의
+        # 어디에 있는지 알아야 한다. error_type만으로는 같은 단어가 여러 번 나올 때 못 고른다.
+        _attach_error_spans(result.get("words_detail"), text_to_evaluate, result.get("recognized_text"))
         scores = result.get("overall_scores", {})
         evaluation = models.PronunciationEvaluation(
             project_id=project.id,
@@ -738,7 +805,15 @@ async def evaluate_pronunciation(
         db.commit()
         db.refresh(evaluation)
 
-        return {"success": True, "project_id": project.id, "evaluation_id": evaluation.id, "slide_number": evaluation.slide_number, **result}
+        return {
+            "success": True, "project_id": project.id, "evaluation_id": evaluation.id,
+            "slide_number": evaluation.slide_number,
+            # words_detail의 reference_span은 **이 문자열 기준**의 오프셋이다. 같이 안 주면
+            # 프론트가 어느 텍스트에 대고 칠해야 할지 알 수 없다(대본을 이어붙이며 "Slide N:"
+            # 접두어가 붙으므로 프론트가 가진 원본과 인덱스가 다르다).
+            "reference_text": text_to_evaluate,
+            **result,
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -766,7 +841,11 @@ async def create_evaluation_feedback(evaluation_id: int, db: Session = Depends(g
         raise HTTPException(status_code=404, detail="평가 결과를 찾을 수 없습니다.")
 
     if evaluation.feedback:
-        return {"success": True, "evaluation_id": evaluation.id, "data": evaluation.feedback, "cached": True}
+        # 연습 팁 형식을 바꾸기 전에 캐시된 피드백이 있다(문자열 리스트). 그대로 내려주면
+        # 지난 평가 화면만 깨지므로 읽을 때 새 형식으로 맞춰준다.
+        cached = dict(evaluation.feedback)
+        cached["practice_tips"] = normalize_practice_tips(cached.get("practice_tips"))
+        return {"success": True, "evaluation_id": evaluation.id, "data": cached, "cached": True}
 
     overall_scores = {
         "accuracy": evaluation.accuracy_score,
@@ -861,7 +940,10 @@ async def get_project(project_id: int, db: Session = Depends(get_db)):
                 {"slide_number": s.slide_number, "source_content": s.source_content, "script": s.script}
                 for s in project.slides
             ],
-            "difficult_words": [{"word": w.word, "phoneme": w.phoneme, "category": w.category} for w in project.difficult_words],
+            "difficult_words": [
+                {"word": w.word, "phoneme": w.phoneme, "category": w.category, "description": w.description}
+                for w in project.difficult_words
+            ],
             "evaluations": [
                 {
                     "id": e.id,

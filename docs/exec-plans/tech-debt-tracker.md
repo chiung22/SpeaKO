@@ -4,9 +4,10 @@
 
 | 항목 | 영향 | 상세 |
 |---|---|---|
-| **발음기호에 장음 기호(ː)가 없음** | 중간 | 피그마 `Coach View Page-4`(단어 목록)는 `구성 › [구ː성]`처럼 장음 위치를 보여주는데, g2pkk 결과엔 ː가 없어 우리는 `[구성]`을 준다. **장단음으로 분류해놓고 어디를 길게 읽는지 안 알려주면 그 카테고리 자체가 무의미하다.** `stdict_client.has_long_vowel()`이 이미 사전 발음을 조회하므로, 여부(bool) 대신 **위치까지** 받아 phoneme에 합성해야 한다. (2026-08-05 피그마 실측에서 발견) |
-| **단어별 설명 문구가 없음** | 중간 | 피그마 단어 목록은 카테고리 고정 문구가 아니라 **구체적 음운 현상 이름 + 설명**을 보여준다(`특정` → "경음화: 받침 뒤에 오는 예사소리(ㄱ/ㄷ/ㅂ/ㅅ/ㅈ)가 된소리로 바뀌어 발음됩니다"). 지금 `/api/analysis/words`는 `word`/`phoneme`/`category`만 준다. 규칙 판정기(비음화·경음화·유음화·구개음화…)를 만들거나 HCX로 생성해야 함. **피그마의 연음 예시 설명문은 앞뒤가 안 맞는 더미 텍스트이므로 문구가 아니라 형식만 요구사항으로 볼 것.** PM에게 서버 생성 여부 확인 필요. (2026-08-05) |
-| **발음 평가 오답의 텍스트 내 위치(offset) 없음** | 중간 | 피그마 `Feedback Page`는 틀린 부분을 **원본·인식 양쪽에** `#FF7676`으로 강조한다. `words_detail`에 단어별 `error_type`(Omission/Insertion/Mispronunciation)은 있지만 위치가 없어, **같은 단어가 여러 번 나오면 프론트가 어디를 칠할지 정할 수 없다.** Omission은 원본에만·Insertion은 인식에만 존재한다는 것도 구분 필요. 수정: 원본/인식 각각의 문자 오프셋을 응답에 포함. (2026-08-05) |
+| ~~발음기호에 장음 기호(ː)가 없음~~ | — | **해결(2026-08-05)**. 아래 해결 목록 참고. |
+| ~~단어별 설명 문구가 없음~~ | — | **해결(2026-08-05)**. 아래 해결 목록 참고. |
+| ~~발음 평가 오답의 텍스트 내 위치(offset) 없음~~ | — | **해결(2026-08-05)**. 아래 해결 목록 참고. |
+| 규칙 판정기가 커버하지 못하는 음운 현상 | 낮음 | `utils/phonology_rules.py`는 비음화·경음화·유음화·구개음화·격음화 5종만 판정한다. 음절 수가 바뀌는 축약, ㄴ첨가 등은 판정하지 않고 일반 문구("표기와 발음이 다릅니다")로 폴백한다 — **틀린 규칙명을 붙이면 사용자가 잘못된 음운 지식을 배우므로, 확신이 없으면 물러나는 쪽을 택했다.** 규칙을 추가할 때는 `tests/test_phonology_rules.py`에 대표 사례를 함께 고정할 것. (2026-08-05) |
 | 사용자 계정/소유권 기반 인가 없음 | 중간 | X-API-Key로 "정당한 호출인지"는 걸러지지만(아래 고친 항목 참고), "누가 호출했는지"는 구분 못함. 지금은 유효한 키만 있으면 아무나 `project_id`를 바꿔가며 남의 프로젝트를 조회/수정 가능. 사용자 계정 시스템이 생겨야 근본 해결. [SECURITY.md](../../SECURITY.md) |
 | TTS 엔드포인트 미연결 | 중간 | `ClovaVoiceClient`가 API 라우터에 없음. `run_pipeline_test.py`/`_batch_generate_and_refine.py`에서만 호출됨. **실제 키(`CLOVA_VOICE_CLIENT_ID`/`SECRET`) 없이는 라우터 연결해도 fallback만 나가서 실질적으로 의미가 없음 — 키 발급 전까지는 보류.** [pronunciation-coaching.md](../product-specs/pronunciation-coaching.md) |
 | DB 마이그레이션 도구 없음 | 낮음(완화됨) | `Base.metadata.create_all()`은 없는 테이블만 만들고 기존 테이블에 컬럼을 못 붙인다. **완화(2026-08-04)**: `db/database.py`의 `_add_missing_columns()`가 `_EXPECTED_COLUMNS`와 실제 스키마를 비교해 빠진 컬럼만 `ALTER TABLE ADD COLUMN` 해준다(현재 `pronunciation_evaluations`의 `feedback`/`reference_text`/`recognized_text`/`slide_number`). 컬럼 **추가**만 커버하고 타입 변경·삭제·백필은 못 하므로, 스키마 변경이 잦아지면 Alembic 도입 검토. [db-schema.md](../generated/db-schema.md) |
@@ -35,6 +36,11 @@
 
 아래는 이미 해결되어 더 이상 부채가 아닙니다. 자세한 내용은 [completed/0001-initial-harness-and-reliability-fixes.md](completed/0001-initial-harness-and-reliability-fixes.md) 참고.
 
+- 피그마 단어 목록/피드백 화면이 요구하는 응답 필드 3종 → 해결(2026-08-05). 195 → 222건 통과.
+  - **장음 기호**: `stdict_client.long_vowel_positions()`가 사전 발음에서 ː 위치를 뽑고(`has_long_vowel`은 이를 감싸는 래퍼로 유지), `phonology_rules.apply_length_marks()`가 해당 음절 뒤에 넣는다. `구성` → `[구ː성]`.
+  - **설명 문구**: `utils/phonology_rules.py` 신규. 철자와 G2P 발음을 자모로 분해해 비음화·경음화·유음화·구개음화·격음화를 판정하고 현상 이름 + 설명을 붙인다. **HCX 생성을 쓰지 않은 이유**는 모듈 주석에 적었다 — 틀린 음운 설명은 사용자가 그대로 배우고, 피그마 시안의 연음 예시가 정확히 그 실패 사례다(같은 값을 두고 "이렇게 읽혀야 하지만 저렇게 발음된다"고 쓰고 없는 자음을 근거로 듦). `difficult_words.description` 컬럼 추가(기존 DB는 부팅 시 `ALTER TABLE`로 자동 보강 — 실측 확인).
+  - **오답 위치**: `words_detail[]`에 `reference_span`/`recognized_span` 추가. Omission은 원본에만, Insertion은 인식에만 채우고, 못 찾으면 `null`(엉뚱한 곳을 칠하느니 안 칠한다). **작업 중 발견** — 오프셋의 기준이 되는 `reference_text`가 평가 응답에 없어서 프론트가 오프셋을 쓸 수 없었다. 응답에 추가함.
+- 연습 팁이 화면 구조와 안 맞음 → 해결(2026-08-05). `practice_tips`를 `[{key, title, description}]`으로. 피그마는 아이콘 + 제목 + 설명인데 제목이 매번 자유 텍스트면 아이콘을 고를 수 없으므로, `key`를 서버가 정한 목록(consonant/ending/intonation/speed/volume/general)에서만 고르게 했다. **옛 캐시(문자열 리스트) 하위호환 포함** — `evaluations.feedback`은 재요청 시 HCX를 다시 부르지 않고 캐시를 반환하므로, 변환하지 않으면 지난 평가 화면만 깨진다.
 - 업로드 크기 제한이 multipart 파싱 이후에만 적용됨 → 해결(2026-08-04). `utils/body_limit.py`의 `MaxBodySizeMiddleware`가 라우팅·파싱 전에 끊는다. `Content-Length`가 상한(기본 25MB, `MAX_REQUEST_BODY_MB`)을 넘으면 **본문을 한 바이트도 받기 전에** 413. 헤더가 없거나 거짓일 수 있으므로 실제 흘러온 바이트도 세다가 넘으면 연결을 끊는다. 실서버에 26MB를 실제로 보내 413 확인.
 - 레이트 리밋 없음 → 해결(2026-08-04). `utils/rate_limit.py`. 유료 API를 태우는 POST(`/api/projects`·`/api/script/*`·`/api/analysis/*`·`/api/evaluation/*`)는 분당 60건(`RATE_LIMIT_EXPENSIVE_PER_MINUTE`), 나머지는 300건(`RATE_LIMIT_PER_MINUTE`). **폴링(`GET /api/script/jobs/{id}`)과 CORS preflight는 유료 등급에서 제외** — 프론트가 1~2초마다 폴링하므로 여기 걸리면 정상 흐름이 깨진다. 429에 `Retry-After` 포함. slowapi를 쓰지 않은 이유는 모듈 주석 참고(기본 저장소가 똑같이 인메모리라 단일 워커에선 차이가 없음). 실서버에서 60건 통과 → 429 확인.
 - 슬라이드 개수 상한 없음 → 해결(2026-08-04). `MAX_SLIDES_PER_PROJECT`(기본 100) 초과 시 413.

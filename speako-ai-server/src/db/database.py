@@ -47,6 +47,9 @@ _EXPECTED_COLUMNS = {
         "feedback": "JSON", "reference_text": "TEXT", "recognized_text": "TEXT",
         "slide_number": "INTEGER",
     },
+    "difficult_words": {
+        "description": "TEXT",
+    },
 }
 
 
