@@ -4,6 +4,7 @@ import requests
 from dotenv import load_dotenv
 
 from utils.usage_tracker import log_hcx_call
+from clova.hcx_request import post_with_retry
 
 load_dotenv()
 
@@ -116,12 +117,9 @@ class ImageTextExtractor:
         }
 
         try:
-            response = requests.post(self.endpoint, headers=headers, json=payload, timeout=REQUEST_TIMEOUT_SECONDS)
-            if response.status_code >= 400:
-                # 본문에 실패 원인(잘못된 파라미터/포맷 등)이 들어 있다. 이걸 안 찍으면
-                # 비전이 100% 실패하고 있어도 "이미지에 글자가 없나 보다"로 오해하게 된다.
-                raise RuntimeError(f"HTTP {response.status_code} — {response.text[:300]}")
-
+            # 실패 시 응답 본문을 예외에 실어 던진다(post_with_retry가 처리). 이걸 안 찍으면
+            # 비전이 100% 실패하고 있어도 "이미지에 글자가 없나 보다"로 오해하게 된다.
+            response = post_with_retry(self.endpoint, headers, payload, REQUEST_TIMEOUT_SECONDS, label="vision")
             result = response.json()
             text = result["result"]["message"]["content"].strip()
 

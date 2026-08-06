@@ -7,6 +7,8 @@
 | ~~발음기호에 장음 기호(ː)가 없음~~ | — | **해결(2026-08-05)**. 아래 해결 목록 참고. |
 | ~~단어별 설명 문구가 없음~~ | — | **해결(2026-08-05)**. 아래 해결 목록 참고. |
 | ~~발음 평가 오답의 텍스트 내 위치(offset) 없음~~ | — | **해결(2026-08-05)**. 아래 해결 목록 참고. |
+| ~~HCX 429(분당 한도)에 재시도가 없음~~ | — | **해결(2026-08-06)**. 아래 해결 목록 참고. |
+| 대본이 근거 없는 구체적 사실을 지어냄 | 중간 | 슬라이드에 텍스트가 없거나 원문이 짧으면(예: "서비스 기술 스택" 한 줄) 모델이 빈칸을 그럴듯한 추측으로 채운다. **실측(2026-08-06, 팀원 발표 4건 94장)**: 텍스트가 0인 슬라이드에 React/Next/Express/MongoDB 스택을 통째로 지어냈고, 외부 제품 분석 발표를 "저희가 개발한"으로 서술했으며, 약어(AIAI) 확장을 틀리게 지어냈다. **완화(2026-08-06)**: `_SINGLE_SLIDE_PROMPT` 가이드라인 1번이 기술·제품·회사 이름/숫자/사람 이름을 지어내지 말고 만든 주체도 단정하지 말라고 못박고, 자리표시자 이름은 `_strip_placeholder_name()`이 코드로 지운다. **근본 해결은 아니다** — 프롬프트 지시는 확률적이라 원문이 빈 슬라이드에서는 여전히 새어 나올 수 있다. 다음 단계: 원문이 빈 슬라이드를 응답에 표시해 "직접 확인 필요"로 안내하기. |
 | 규칙 판정기가 커버하지 못하는 음운 현상 | 낮음 | `utils/phonology_rules.py`는 비음화·경음화·유음화·구개음화·격음화 5종만 판정한다. 음절 수가 바뀌는 축약, ㄴ첨가 등은 판정하지 않고 일반 문구("표기와 발음이 다릅니다")로 폴백한다 — **틀린 규칙명을 붙이면 사용자가 잘못된 음운 지식을 배우므로, 확신이 없으면 물러나는 쪽을 택했다.** 규칙을 추가할 때는 `tests/test_phonology_rules.py`에 대표 사례를 함께 고정할 것. (2026-08-05) |
 | 사용자 계정/소유권 기반 인가 없음 | 중간 | X-API-Key로 "정당한 호출인지"는 걸러지지만(아래 고친 항목 참고), "누가 호출했는지"는 구분 못함. 지금은 유효한 키만 있으면 아무나 `project_id`를 바꿔가며 남의 프로젝트를 조회/수정 가능. 사용자 계정 시스템이 생겨야 근본 해결. [SECURITY.md](../../SECURITY.md) |
 | TTS 엔드포인트 미연결 | 중간 | `ClovaVoiceClient`가 API 라우터에 없음. `run_pipeline_test.py`/`_batch_generate_and_refine.py`에서만 호출됨. **실제 키(`CLOVA_VOICE_CLIENT_ID`/`SECRET`) 없이는 라우터 연결해도 fallback만 나가서 실질적으로 의미가 없음 — 키 발급 전까지는 보류.** [pronunciation-coaching.md](../product-specs/pronunciation-coaching.md) |
@@ -36,11 +38,13 @@
 
 아래는 이미 해결되어 더 이상 부채가 아닙니다. 자세한 내용은 [completed/0001-initial-harness-and-reliability-fixes.md](completed/0001-initial-harness-and-reliability-fixes.md) 참고.
 
+- HCX 429(분당 한도)에 재시도가 없음 → 해결(2026-08-06). `clova/hcx_request.py` 신규. 슬라이드 한 장당 한 번씩 부르는 구조라 발표 한 건만으로도 분당 한도에 닿는데, 429를 그대로 던져서 **그 슬라이드가 영구 누락**됐다. 게다가 "빈 응답 재시도"는 곧바로 다시 던져서 429를 한 번 더 맞았다. **실측: 94장 4개 발표를 동시 4개로 돌렸더니 4개 중 3개가 통째로 실패**했고 화면에는 `missing_slide_numbers`만 남았다. 이제 429·5xx·네트워크 예외에 지수 백오프로 재시도한다(`Retry-After` 헤더 우선, 지터 포함, 한 번 대기 상한 30초). 429가 아닌 4xx(잘못된 키/요청)는 다시 불러도 같으므로 즉시 실패시킨다. HCX를 부르는 5곳(전체 생성·고도화·부분 재생성·발음 피드백·비전 추출) 전부 적용. `tests/test_hcx_retry.py` 9건.
+
 - 피그마 단어 목록/피드백 화면이 요구하는 응답 필드 3종 → 해결(2026-08-05). 195 → 222건 통과.
   - **장음 기호**: `stdict_client.long_vowel_positions()`가 사전 발음에서 ː 위치를 뽑고(`has_long_vowel`은 이를 감싸는 래퍼로 유지), `phonology_rules.apply_length_marks()`가 해당 음절 뒤에 넣는다. `구성` → `[구ː성]`.
   - **설명 문구**: `utils/phonology_rules.py` 신규. 철자와 G2P 발음을 자모로 분해해 비음화·경음화·유음화·구개음화·격음화를 판정하고 현상 이름 + 설명을 붙인다. **HCX 생성을 쓰지 않은 이유**는 모듈 주석에 적었다 — 틀린 음운 설명은 사용자가 그대로 배우고, 피그마 시안의 연음 예시가 정확히 그 실패 사례다(같은 값을 두고 "이렇게 읽혀야 하지만 저렇게 발음된다"고 쓰고 없는 자음을 근거로 듦). `difficult_words.description` 컬럼 추가(기존 DB는 부팅 시 `ALTER TABLE`로 자동 보강 — 실측 확인).
   - **오답 위치**: `words_detail[]`에 `reference_span`/`recognized_span` 추가. Omission은 원본에만, Insertion은 인식에만 채우고, 못 찾으면 `null`(엉뚱한 곳을 칠하느니 안 칠한다). **작업 중 발견** — 오프셋의 기준이 되는 `reference_text`가 평가 응답에 없어서 프론트가 오프셋을 쓸 수 없었다. 응답에 추가함.
-- 연습 팁이 화면 구조와 안 맞음 → 해결(2026-08-05). `practice_tips`를 `[{key, title, description}]`으로. 피그마는 아이콘 + 제목 + 설명인데 제목이 매번 자유 텍스트면 아이콘을 고를 수 없으므로, `key`를 서버가 정한 목록(consonant/ending/intonation/speed/volume/general)에서만 고르게 했다. **옛 캐시(문자열 리스트) 하위호환 포함** — `evaluations.feedback`은 재요청 시 HCX를 다시 부르지 않고 캐시를 반환하므로, 변환하지 않으면 지난 평가 화면만 깨진다.
+- 연습 팁이 화면 구조와 안 맞음 → 해결(2026-08-05). `practice_tips`를 `[{key, title, description}]`으로. 피그마는 아이콘 + 제목 + 설명인데 제목이 매번 자유 텍스트면 아이콘을 고를 수 없으므로, `key`를 서버가 정한 목록(consonant/ending/intonation/speed/general)에서만 고르게 했다. (성량 `volume`은 PM 확정으로 제외 — 녹음 음량이 마이크 거리에 좌우되는 데다 Azure가 성량 데이터를 주지 않아 팁을 쓰면 근거 없이 지어내는 것이 된다.) **옛 캐시(문자열 리스트) 하위호환 포함** — `evaluations.feedback`은 재요청 시 HCX를 다시 부르지 않고 캐시를 반환하므로, 변환하지 않으면 지난 평가 화면만 깨진다.
 - 업로드 크기 제한이 multipart 파싱 이후에만 적용됨 → 해결(2026-08-04). `utils/body_limit.py`의 `MaxBodySizeMiddleware`가 라우팅·파싱 전에 끊는다. `Content-Length`가 상한(기본 25MB, `MAX_REQUEST_BODY_MB`)을 넘으면 **본문을 한 바이트도 받기 전에** 413. 헤더가 없거나 거짓일 수 있으므로 실제 흘러온 바이트도 세다가 넘으면 연결을 끊는다. 실서버에 26MB를 실제로 보내 413 확인.
 - 레이트 리밋 없음 → 해결(2026-08-04). `utils/rate_limit.py`. 유료 API를 태우는 POST(`/api/projects`·`/api/script/*`·`/api/analysis/*`·`/api/evaluation/*`)는 분당 60건(`RATE_LIMIT_EXPENSIVE_PER_MINUTE`), 나머지는 300건(`RATE_LIMIT_PER_MINUTE`). **폴링(`GET /api/script/jobs/{id}`)과 CORS preflight는 유료 등급에서 제외** — 프론트가 1~2초마다 폴링하므로 여기 걸리면 정상 흐름이 깨진다. 429에 `Retry-After` 포함. slowapi를 쓰지 않은 이유는 모듈 주석 참고(기본 저장소가 똑같이 인메모리라 단일 워커에선 차이가 없음). 실서버에서 60건 통과 → 429 확인.
 - 슬라이드 개수 상한 없음 → 해결(2026-08-04). `MAX_SLIDES_PER_PROJECT`(기본 100) 초과 시 413.

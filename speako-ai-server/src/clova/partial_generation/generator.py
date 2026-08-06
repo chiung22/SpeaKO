@@ -3,6 +3,7 @@ import requests
 from dotenv import load_dotenv
 
 from utils.usage_tracker import log_hcx_call
+from clova.hcx_request import post_with_retry
 from clova.toon_parser import clean_script_text
 from clova.styles import STYLE_INSTRUCTIONS, audience_instruction  # noqa: F401 (STYLE_INSTRUCTIONS: 기존 임포트 경로 호환)
 
@@ -84,9 +85,7 @@ class PartialScriptGenerator:
         }
 
         try:
-            response = requests.post(self.endpoint, headers=headers, json=payload, timeout=REQUEST_TIMEOUT_SECONDS)
-            response.raise_for_status()
-
+            response = post_with_retry(self.endpoint, headers, payload, REQUEST_TIMEOUT_SECONDS, label="partial")
             result = response.json()
             toon_text = result['result']['message']['content']
 
