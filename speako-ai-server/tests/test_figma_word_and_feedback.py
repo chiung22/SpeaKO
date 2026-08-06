@@ -239,3 +239,45 @@ def test_old_cached_string_tips_still_readable(db_session_factory):
 
     tips = response.json()["data"]["practice_tips"]
     assert tips == [{"key": "general", "title": "", "description": "천천히 3번 읽어보세요."}]
+
+
+def test_word_list_excludes_words_with_no_pronunciation_issue(db_session_factory):
+    """분류가 없다는 건 '발음상 주의할 게 없다'는 뜻이다(_classify_word_category 정의).
+    그런 단어를 목록에 넣으면 피그마 화면에서 뱃지도 설명도 빈 줄이 된다.
+    실측(2026-08-06): 제로 녹음 대본에서 40개 중 25개가 여기 해당했다."""
+    project_id = _project_with_script(
+        db_session_factory,
+        "생각과 노력으로 국물을 준비하는 타인의 사상을 살펴봅니다.",
+    )
+
+    response = client.post("/api/analysis/words", json={"project_id": project_id})
+    words = response.json()["data"]["words"]
+
+    assert all(w["category"] for w in words), \
+        f"분류 없는 단어가 목록에 있습니다: {[w['word'] for w in words if not w['category']]}"
+    assert all(w["description"] for w in words), "설명이 빈 단어가 목록에 있습니다"
+
+
+def test_summary_matches_returned_word_count(db_session_factory):
+    """요약 집계와 실제 목록이 어긋나면 화면의 '장단음 12개' 같은 숫자가 거짓말이 된다."""
+    project_id = _project_with_script(db_session_factory, "국물과 신라의 발음을 연습합니다.")
+
+    data = client.post("/api/analysis/words", json={"project_id": project_id}).json()["data"]
+
+    assert sum(data["summary"].values()) == len(data["words"])
+
+
+def test_practice_tips_are_capped_at_three():
+    """피그마는 팁 카드를 3개 그린다. 프롬프트가 '정확히 3줄'을 요구해도 모델이 4줄을 준다
+    (실측: 제로 녹음 피드백이 4개). 넘치면 레이아웃이 깨지므로 코드로 자른다."""
+    from clova.feedback.generator import normalize_practice_tips
+
+    tips = normalize_practice_tips([
+        "consonant | 자음 | 설명1.",
+        "ending | 끝소리 | 설명2.",
+        "intonation | 억양 | 설명3.",
+        "speed | 속도 | 설명4.",
+    ])
+
+    assert len(tips) == 3
+    assert [t["key"] for t in tips] == ["consonant", "ending", "intonation"]

@@ -99,10 +99,17 @@ def detect_rule(word: str, phoneme: str):
         if prev_jong in {"ㄷ", "ㅌ"} and cho_a == "ㅇ" and jung_a == "ㅣ" and cho_b in {"ㅈ", "ㅊ"}:
             return "구개음화"
 
-        # 격음화: ㅎ이 예사소리와 합쳐져 거센소리로
+        # 격음화: ㅎ이 예사소리와 합쳐져 거센소리로. 두 방향 다 있다.
+        # (1) 받침 ㅎ + 예사소리 초성 — 좋고 → 조코
         if cho_b in _ASPIRATED and cho_a in _PLAIN and (prev_jong == "ㅎ" or "ㅎ" in {jong_a}):
             return "격음화"
         if jong_b in _ASPIRATED and jong_a in _PLAIN:
+            return "격음화"
+        # (2) 예사소리 받침 + 초성 ㅎ — 축하 → 추카, 역할 → 여칼, 입학 → 이팍, 맏형 → 마텽.
+        #     실은 이쪽이 더 흔한데 (1)만 보고 있어서 전부 일반 문구로 떨어졌다(실측 2026-08-06).
+        #     앞 음절의 받침이 사라져 있어야 한다 — 합쳐졌다는 증거다.
+        prev_jong_spoken = pairs[index - 1][1][2] if index > 0 else ""
+        if cho_a == "ㅎ" and cho_b in _ASPIRATED and prev_jong in _PLAIN and not prev_jong_spoken:
             return "격음화"
 
     for index, ((cho_a, _, jong_a), (cho_b, _, jong_b)) in enumerate(pairs):

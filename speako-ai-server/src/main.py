@@ -674,8 +674,14 @@ def _analyze_difficult_words(script_text: str):
         word = item["word"]
         long_vowels = stdict_client.long_vowel_positions(word)
         category = _classify_word_category(word, item.get("is_different", False), long_vowels)
-        if category:
-            summary[category] += 1
+        # 분류가 None이라는 건 `_classify_word_category` 정의상 **철자=발음이고 장단음도 아니다**,
+        # 즉 발음상 주의할 게 없다는 뜻이다. 그런 단어를 '발음 주의 단어' 목록에 넣으면
+        # 피그마 화면에서 뱃지도 설명도 빈 줄이 된다(실측: 제로 녹음 대본에서 40개 중 25개가
+        # 여기 해당 — '생각', '노력', '타인'처럼 어려울 게 없는 단어들이었다).
+        # 형태소 분석기는 "명사인가"만 보므로 이 걸러내기는 여기서 해야 한다.
+        if not category:
+            continue
+        summary[category] += 1
 
         # 장단음으로 분류해놓고 어디를 길게 읽는지 안 알려주면 그 카테고리가 무의미하다.
         # 피그마 단어 목록도 `구성 › [구ː성]`처럼 위치를 보여준다.
