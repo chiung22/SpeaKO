@@ -510,9 +510,13 @@ def test_analysis_words_uses_kiwi_when_etri_unavailable(db_session_factory):
     assert body["success"] is True
     words = [w["word"] for w in body["data"]["words"]]
     assert len(words) > 0
-    # Kiwi가 조사를 떼고 명사만 뽑았는지 — "메타버스"가 온전히(조사 없이) 잡혀야 한다.
-    assert "메타버스" in words
     assert set(body["data"]["summary"].keys()) == {"장단음", "연음", "표기-발음불일치"}
+
+    # "조사를 떼고 명사만 뽑았는가"는 추출 단계의 책임이므로 그 계층에서 확인한다.
+    # API 응답은 발음상 주의할 게 없는 단어를 걸러내므로("메타버스"는 철자=발음이고 장단음도
+    # 아니라 빠진다) 여기서 특정 단어를 기대하면 걸러내기 규칙과 함께 깨진다.
+    extracted = main.kiwi_analyzer.extract_difficult_words("메타버스와 인프라 구축의 특징을 살펴봅시다.")
+    assert "메타버스" in extracted, "Kiwi가 조사를 떼고 명사를 온전히 뽑지 못했습니다"
 
 
 def test_analysis_words_classifies_into_categories_and_persists(monkeypatch, db_session_factory):
@@ -562,18 +566,21 @@ def test_analysis_words_long_vowel_fires_even_when_spelling_matches_pronunciatio
     assert data["summary"]["장단음"] == 1
 
 
-def test_analysis_words_category_none_when_not_different_and_not_long_vowel(monkeypatch, db_session_factory):
-    # 철자=발음이고 장단음도 아니면 분류하지 않는다(None) — 이 early-return 분기의 회귀 방지.
+def test_analysis_words_drops_word_with_no_pronunciation_issue(monkeypatch, db_session_factory):
+    # 철자=발음이고 장단음도 아니면 분류가 없다(None) = 발음상 주의할 게 없다는 뜻이다.
+    # 그런 단어는 '발음 주의 단어' 목록에서 아예 빼야 한다 — 넣으면 피그마 화면에서
+    # 뱃지도 설명도 빈 줄이 된다(실측 2026-08-06: 실제 대본에서 40개 중 25개가 여기 해당).
     project_id = _create_project(db_session_factory, [(1, "내용")], script_map={1: "가구 배치."})
     monkeypatch.setattr(main.etri_analyzer, "extract_difficult_words", lambda script_text: ["가구"])
     monkeypatch.setattr(main.g2p_converter, "convert_words",
                         lambda words: [{"word": "가구", "phoneme": "[가구]", "is_different": False}])
     monkeypatch.setattr(main.stdict_client, "has_long_vowel", lambda word: False)
+    monkeypatch.setattr(main.stdict_client, "long_vowel_positions", lambda word: ())
 
     response = client.post("/api/analysis/words", json={"project_id": project_id})
     assert response.status_code == 200
     data = response.json()["data"]
-    assert data["words"][0]["category"] is None
+    assert data["words"] == [], "발음상 주의할 게 없는 단어가 목록에 남아 있습니다"
     assert data["summary"] == {"장단음": 0, "연음": 0, "표기-발음불일치": 0}
 
 

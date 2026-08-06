@@ -125,6 +125,10 @@ def parse_feedback_sections(text):
 #     한 번 겪은 문제와 같은 종류다(위 STRONG_WORD_THRESHOLD 주석 참고).
 _TIP_KEYS = ("consonant", "ending", "intonation", "speed")
 
+# 피그마 Coach View Page는 팁 카드를 **3개** 그린다. 프롬프트도 "정확히 3줄"을 요구하지만
+# 모델이 종종 4줄을 준다(실측: 제로 녹음 피드백이 4개). 넘치면 화면 레이아웃이 깨지므로 코드로 자른다.
+MAX_PRACTICE_TIPS = 3
+
 
 def normalize_practice_tips(tips):
     """연습 팁을 [{key, title, description}] 형태로 정규화한다.
@@ -157,7 +161,7 @@ def normalize_practice_tips(tips):
             # 옛 형식(문장 하나) 또는 형식을 안 지킨 경우 — 내용은 살리고 제목만 비운다.
             normalized.append({"key": "general", "title": "", "description": str(tip).strip()})
 
-    return normalized
+    return normalized[:MAX_PRACTICE_TIPS]
 
 
 class PronunciationFeedbackGenerator:
