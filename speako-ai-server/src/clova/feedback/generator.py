@@ -15,6 +15,7 @@ import requests
 from dotenv import load_dotenv
 
 from utils.usage_tracker import log_hcx_call
+from clova.hcx_request import post_with_retry
 
 load_dotenv()
 
@@ -231,10 +232,7 @@ class PronunciationFeedbackGenerator:
         }
 
         try:
-            response = requests.post(self.endpoint, headers=headers, json=payload, timeout=REQUEST_TIMEOUT_SECONDS)
-            if response.status_code >= 400:
-                raise RuntimeError(f"HTTP {response.status_code} — {response.text[:300]}")
-
+            response = post_with_retry(self.endpoint, headers, payload, REQUEST_TIMEOUT_SECONDS, label="feedback")
             result = response.json()
             usage = result.get("result", {}).get("usage", {})
             log_hcx_call(

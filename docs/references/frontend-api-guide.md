@@ -187,7 +187,8 @@ DELETE /api/projects/{id}     기록 삭제
 // 완료
 { "success": true, "job_id": "abc123", "status": "completed", "project_id": 12,
   "data": { "slides": [{"slide_number": "1", "script": "안녕하십니까..."}],
-            "missing_slide_numbers": [] } }
+            "missing_slide_numbers": [],
+            "thin_source_slide_numbers": ["20"] } }
 
 // 실패
 { "success": true, "job_id": "abc123", "status": "failed", "error": "대본 생성에 실패했습니다." }
@@ -195,6 +196,9 @@ DELETE /api/projects/{id}     기록 삭제
 - `status`가 `processing`이 아니면 폴링을 멈춥니다.
 - 없는 `job_id`는 `404`.
 - `data.missing_slide_numbers`에 번호가 있으면 그 슬라이드는 대본이 비어 있습니다 — "다시 생성" 안내 후 `POST /api/script/partial`로 그 장만 재생성하면 됩니다.
+- `data.thin_source_slide_numbers`에 번호가 있으면 그 슬라이드는 **PPT에서 읽은 내용이 제목 한 줄뿐이라 대본의 근거가 없었던** 장입니다. 대본은 비어 있지 않지만 "화면에 정리한 내용을 보시겠습니다" 수준의 일반적인 안내문이니, **"이 슬라이드는 내용을 직접 확인·보완해 주세요"** 배지를 띄워 주세요.
+  - 왜 필요한가: 이런 장에 모델이 그럴듯한 대본을 지어내면 발표자가 그대로 읽다가 사실이 아닌 말을 하게 됩니다. 실측으로 텍스트가 0인 "기술 스택" 장에 쓰지도 않은 스택 이름이 통째로 들어간 적이 있어서, 지어내는 대신 일반적인 문장으로 두고 이 필드로 알리는 방식을 택했습니다.
+  - `missing_slide_numbers`와 달리 재생성해도 결과는 같습니다(원문이 없는 게 원인). 발표자가 슬라이드 내용을 추가하거나 `POST /api/script/partial`의 `extra_requirement`로 내용을 직접 알려줘야 채워집니다.
 - ⚠️ 작업 상태는 서버 메모리에 있습니다. **서버가 재시작되면 진행 중이던 작업은 사라지므로**, 폴링이 404를 받으면 "다시 시도"를 안내해 주세요.
 
 ---
