@@ -36,7 +36,7 @@ SpeaKO AI 서버(FastAPI)의 엔드포인트 계약입니다. 프론트엔드가
 | **`Retry-After`** | `429` 응답의 이 헤더를 삼키지 마세요. 재시도 간격 계산에 씁니다. |
 | **상태코드** | `202`/`413`/`422`/`429`/`502`를 그대로. 특히 **`202`를 `200`으로 바꾸면 프론트가 폴링을 시작하지 않습니다.** |
 | **폴링 경로** | `GET /api/script/jobs/{id}`를 통과시켜야 합니다(1~2초 간격 호출). |
-| **타임아웃** | `POST /api/evaluation/audio`는 Azure 왕복이라 수십 초 걸릴 수 있습니다. 이 경로만 읽기 타임아웃을 60초 이상으로. |
+| **타임아웃** | `POST /api/evaluation/audio`는 Azure가 녹음을 실시간의 약 0.5배 속도로 처리합니다. **실측: 5분 녹음 → 148초**, 상한인 15분 녹음이면 약 7분. 이 경로만 읽기 타임아웃을 **600초**로. |
 
 ### 입력 길이 상한
 
@@ -90,7 +90,8 @@ SpeaKO AI 서버(FastAPI)의 엔드포인트 계약입니다. 프론트엔드가
 
 ### AI 피드백 응답 (`POST /api/evaluation/{id}/feedback`)
 
-`practice_tips`는 `Coach View Page` 우측 "발음 팁"(아이콘 + 제목 + 설명 3개)에 대응합니다.
+`practice_tips`는 `Coach View Page` 우측 "발음 팁"(아이콘 + 제목 + 설명 **4개**)에 대응합니다.
+피그마 갱신본 ㊹ "음성 파일 AI 피드백 (자음/끝소리/강세억양/속도)"과 같은 4분류가 한 개씩 나옵니다.
 
 ```json
 "practice_tips": [
@@ -105,7 +106,7 @@ SpeaKO AI 서버(FastAPI)의 엔드포인트 계약입니다. 프론트엔드가
 | `consonant` | 자음 발음 | 피그마 기존 (파형) |
 | `ending` | 끝소리 | 피그마 기존 (음파) |
 | `intonation` | 강세·억양 | 피그마 기존 (막대) |
-| `speed` | 말하기 속도 | **신규 필요** |
+| `speed` | 말하기 속도 | 피그마 갱신본 "천천히 강조하기" |
 | `general` | 분류 없음 (옛 데이터 포함) | 기본 아이콘 |
 
 **성량(`volume`)은 내려가지 않습니다.** 녹음 음량은 마이크와의 거리에 좌우돼서 발표자의 실제 목소리 크기를 뜻하지 않고, Azure가 주는 점수에도 성량 정보가 없어 팁을 쓰면 근거 없는 조언이 됩니다. 아이콘을 준비하지 않으셔도 됩니다.
@@ -121,9 +122,13 @@ POST /api/script/full         생성 시작 → job_id (즉시 202)
 GET  /api/script/jobs/{id}    1~2초마다 폴링 → completed면 대본
 PUT  /api/projects/{id}/slides/{n}   사용자가 고친 대본 저장
 POST /api/script/partial      슬라이드 하나만 다시 생성
+PUT  /api/projects/{id}       프로젝트명 수정
+GET  /api/projects/{id}/script.docx      대본 다운로드 (.docx)
+GET  /api/projects/{id}/highlight.docx   하이라이팅 대본 다운로드 (.docx)
 
 [발표 발음 코칭]
 POST /api/analysis/words      발음 주의 단어 + 발음기호 (하이라이팅용)
+POST /api/tts/word            단어 발음 듣기 → MP3 바이트 (스피커 버튼)
 POST /api/evaluation/audio    녹음 업로드 → 점수 + 인식 텍스트
 POST /api/evaluation/{id}/feedback   AI 코칭 피드백
 
@@ -182,10 +187,12 @@ DELETE /api/projects/{id}     기록 삭제
 
 ```json
 // 처리 중
-{ "success": true, "job_id": "abc123", "status": "processing" }
+{ "success": true, "job_id": "abc123", "status": "processing",
+  "step": 3, "total_steps": 4, "step_label": "대본 작성" }
 
 // 완료
-{ "success": true, "job_id": "abc123", "status": "completed", "project_id": 12,
+{ "success": true, "job_id": "abc123", "status": "completed",
+  "step": 4, "total_steps": 4, "step_label": "완료", "project_id": 12,
   "data": { "slides": [{"slide_number": "1", "script": "안녕하십니까..."}],
             "missing_slide_numbers": [],
             "thin_source_slide_numbers": ["20"] } }
@@ -195,6 +202,25 @@ DELETE /api/projects/{id}     기록 삭제
 ```
 - `status`가 `processing`이 아니면 폴링을 멈춥니다.
 - 없는 `job_id`는 `404`.
+- **`step` / `total_steps` / `step_label`** — 피그마 로딩 화면의 4단계 표시용입니다.
+  `① 파일 수령 → ② 텍스트 추출 → ③ 대본 작성 → ④ 완료`
+  ①②는 `POST /api/projects`(업로드·추출)에서 이미 끝난 뒤에 이 화면이 뜨므로, **작업은 항상 3단계에서 시작**합니다. 피그마도 ①②는 채워진 상태로 그려져 있습니다.
+  > 하이라이팅(`/api/analysis/words`)과 음성 분석(`/api/evaluation/audio`)은 **동기 호출이라 폴링할 job이 없습니다.** 그 두 로딩 화면의 단계 표시는 **프론트에서 연출**합니다 — 아래 참고.
+
+### 동기 API의 로딩 4단계는 프론트에서 연출합니다 (결정, 2026-08-09)
+
+대본 생성만 위처럼 실제 단계를 줍니다. 하이라이팅·음성 분석은 요청 하나가 끝날 때까지 연결을 붙잡는 **동기 호출**이라, 서버가 중간에 "2단계 끝났어요"라고 알릴 창구가 없습니다(응답이 한 번뿐입니다). 비동기로 바꾸면 프론트·스프링·명세가 함께 바뀌어야 해서 **시연 일정상 하지 않기로** 했습니다.
+
+**단계 순서 자체는 사실입니다** — 서버가 실제로 그 순서로 일합니다. 연출로 채우는 건 타이밍뿐입니다.
+
+| 화면 | 실제 소요 | 연출 방법 |
+|---|---|---|
+| 발음 하이라이팅 | 2~5초 | 1→2단계를 0.5초 간격으로 넘기고, 3단계에서 응답 대기 → 응답 오면 4단계 |
+| 음성 분석 | **최대 7분** | 위와 같되, **"최대 7분 걸릴 수 있어요" 안내와 경과 시간(mm:ss)을 반드시 함께** 표시 |
+
+⚠️ **음성 분석은 안내 문구가 필수입니다.** 녹음 길이에 비례해서 최대 7분이 걸리는데(15분 녹음 기준), 아무 설명 없이 3단계에서 7분을 머무르면 사용자는 멈춘 줄 알고 새로고침합니다. 가짜 단계를 빠르게 넘기는 것보다 **예상 시간 + 경과 시간**을 보여주는 쪽이 훨씬 덜 답답합니다.
+
+> 혹시 사용자가 도중에 이탈해도 **결과는 서버 DB에 저장됩니다.** `GET /api/evaluations`(코칭 내역)에서 확인할 수 있으니, 실패 화면에 "마이페이지에서 확인하세요"를 안내해 주세요.
 - `data.missing_slide_numbers`에 번호가 있으면 그 슬라이드는 대본이 비어 있습니다 — "다시 생성" 안내 후 `POST /api/script/partial`로 그 장만 재생성하면 됩니다.
 - `data.thin_source_slide_numbers`에 번호가 있으면 그 슬라이드는 **PPT에서 읽은 내용이 제목 한 줄뿐이라 대본의 근거가 없었던** 장입니다. 대본은 비어 있지 않지만 "화면에 정리한 내용을 보시겠습니다" 수준의 일반적인 안내문이니, **"이 슬라이드는 내용을 직접 확인·보완해 주세요"** 배지를 띄워 주세요.
   - 왜 필요한가: 이런 장에 모델이 그럴듯한 대본을 지어내면 발표자가 그대로 읽다가 사실이 아닌 말을 하게 됩니다. 실측으로 텍스트가 0인 "기술 스택" 장에 쓰지도 않은 스택 이름이 통째로 들어간 적이 있어서, 지어내는 대신 일반적인 문장으로 두고 이 필드로 알리는 방식을 택했습니다.
@@ -208,6 +234,7 @@ DELETE /api/projects/{id}     기록 삭제
 | 목적 | 요청 |
 |---|---|
 | 사용자가 고친 대본 저장 | `PUT /api/projects/{id}/slides/{n}` — body `{ "script": "고친 내용" }` |
+| **프로젝트명 수정** | `PUT /api/projects/{id}` — body `{ "name": "중간발표 최종본" }` (빈 문자열은 `422`) |
 | 슬라이드 추가 | `POST /api/projects/{id}/slides` — body `{ "position": 2, "script": "" }` (position 없으면 맨 끝) |
 | 슬라이드 삭제 | `DELETE /api/projects/{id}/slides/{n}` |
 
@@ -222,6 +249,18 @@ DELETE /api/projects/{id}     기록 삭제
   "audience": "면접관", "extra_requirement": "더 짧게" }
 ```
 기존 대본을 다시 보낼 필요 없이 서버에 저장된 것을 씁니다. (동기 호출, 몇 초)
+
+### 3-1. `.docx` 다운로드
+
+| 목적 | 요청 | 파일명 |
+|---|---|---|
+| 대본 저장 | `GET /api/projects/{id}/script.docx` | `{프로젝트명}.docx` |
+| 하이라이팅 대본 저장 | `GET /api/projects/{id}/highlight.docx` | `하이라이팅_{프로젝트명}.docx` |
+
+- 응답은 JSON이 아니라 **docx 바이트**입니다. `Content-Disposition: attachment`가 붙어 있어서 `<a href>`나 `window.open`으로 바로 받아도 됩니다.
+- 파일명은 **프로젝트명**입니다(피그마 ㉒ "13의 제목명.docx로 저장"). 이름을 바꾸려면 위 `PUT /api/projects/{id}`를 먼저 부르세요.
+- 하이라이팅본은 발음 주의 단어에 **피그마와 같은 색**을 칠하고 범례를 붙입니다 — 장단음 `F7358E` / 연음 `0072F2` / 표기-발음불일치 `F79322`.
+- 아직 대본이 없으면 `422`.
 
 ---
 
@@ -241,26 +280,113 @@ body: `{ "project_id": 12 }`
 
 ---
 
+## 4-1. 발음 듣기 — `POST /api/tts/word`
+
+단어 목록의 **스피커 버튼**용입니다. JSON이 아니라 **MP3 바이트를 그대로** 돌려줍니다.
+
+body: `{ "project_id": 12, "word": "각자" }`
+
+| 필드 | 필수 | 설명 |
+|---|---|---|
+| `word` | ✅ | 화면에 보이는 철자. 최대 100자 |
+| `project_id` | | 있으면 이 프로젝트에 저장된 발음기호를 먼저 씁니다(권장 — 재분석이 없어 가장 빠릅니다) |
+| `pronunciation` | | 합성할 발음을 직접 지정. `"[여칼]"`처럼 대괄호가 있어도 됩니다 |
+
+응답: `Content-Type: audio/mpeg` + MP3 바이트.
+
+```js
+const res = await fetch(`${API}/api/tts/word`, {
+  method: "POST",
+  headers: { "Content-Type": "application/json", "X-API-Key": KEY },
+  body: JSON.stringify({ project_id, word }),
+});
+new Audio(URL.createObjectURL(await res.blob())).play();
+```
+
+**⚠️ 들려주는 건 철자가 아니라 표준 발음입니다.** `각자`를 요청하면 `[각짜]`가, `책임`을 요청하면
+`[채김]`이 재생됩니다. Clova Voice가 한국어 음운 규칙을 일부만 적용해서(실측: 격음화·유음화는
+적용, 경음화·연음은 미적용), 철자를 그대로 합성하면 틀린 발음이 나가기 때문입니다.
+철자 그대로 들려주고 싶으면 `pronunciation`에 철자를 넣으세요.
+
+**⚠️ 장단음 단어는 소리로 구분되지 않습니다.** `[최ː소]`의 장음 기호 `ː`는 Clova Voice 평문
+입력으로 표현할 방법이 없어서 빼고 보냅니다. 즉 `최소`의 발음 듣기는 철자를 그대로 읽은 것과
+같은 소리가 납니다(틀린 소리는 아니지만, 길게 읽으라는 정보가 소리에는 안 담깁니다).
+실측(2026-08-09, 제로 대본): 주의 단어 19개 중 **11개가 장단음**이라 적은 비율이 아닙니다.
+→ 장단음 단어는 화면에서 `[최ː소]`의 `ː`를 눈에 띄게 보여주거나 "첫 음절을 길게" 문구를
+함께 띄워 주세요. 소리만으로는 전달되지 않습니다.
+
+- 같은 단어를 다시 요청하면 서버 캐시에서 나갑니다(응답 헤더 `X-TTS-Cache: hit`). 프론트에서
+  따로 캐싱하지 않아도 됩니다.
+- 유료 경로라 **분당 60건 제한**에 포함됩니다(429). 스피커 버튼 연타는 프론트에서 막아주세요.
+- 합성 실패 시 `502`.
+
+---
+
 ## 5. 녹음 평가 — `POST /api/evaluation/audio`
 
 `multipart/form-data`
 - `project_id` (필수)
-- `audio_file` (필수) — `.webm` / `.wav` / `.mp3` / `.m4a`, **최대 10MB**
+- `audio_file` (필수) — `.webm` / `.wav` / `.mp3` / `.m4a`, **최대 20MB이면서 15분 이내**
 - `slide_number` (선택) — 슬라이드별로 나눠 녹음할 때 그 번호
 - `reference_text` (선택)
 
 평가 기준 대본 우선순위: `reference_text` > `slide_number`(그 장 대본만) > 대본 전체.
 슬라이드 하나만 읽었는데 전체를 기준으로 채점하면 완성도가 바닥으로 나오므로, 부분 녹음이면 `slide_number`를 넣어주세요.
 
+### 업로드 제한 — 크기와 길이 **둘 다** 봅니다
+
+| 제한 | 값 | 초과 시 |
+|---|---|---|
+| 파일 크기 | **20MB** | `413` |
+| 녹음 길이 | **15분** | `422` |
+
+**왜 둘 다 있나요?** 같은 20MB라도 녹음 품질에 따라 재생 길이가 3배 넘게 차이 납니다(실측: 폰 녹음 124kbps는 21분, 브라우저 녹음 40kbps는 67분). 그런데 평가 시간은 **길이에 비례**하므로, 크기만 막으면 처리 시간이 무제한이 됩니다.
+
+두 경우 모두 `detail`에 사용자에게 그대로 보여줄 수 있는 한국어 문구가 들어 있습니다.
+
+```json
+413 → { "detail": "파일 크기가 너무 큽니다. (최대 20MB) 슬라이드별로 나눠 녹음하시면 한 번에 올리는 분량이 줄어듭니다." }
+422 → { "detail": "녹음이 너무 깁니다. (18.3분 / 최대 15분) 슬라이드별로 나눠 녹음하시면 한 번에 올리는 분량이 줄어듭니다." }
+```
+
+### 녹음 화면에 넣어주실 안내 문구 (hint text)
+
+에러가 난 **뒤에** 알려주면 사용자는 이미 긴 녹음을 마친 뒤입니다. 녹음 시작 화면에 미리 띄워주세요.
+
+> 한 번에 **15분, 20MB**까지 올릴 수 있어요. 발표가 길면 슬라이드별로 나눠 녹음해보세요.
+
+- 브라우저에서 녹음 중이라면 **경과 시간을 표시**하고 15분에 가까워지면 알려주는 게 가장 확실합니다.
+- 파일을 고르는 방식이라면 업로드 전에 `File.size`로 20MB를 먼저 걸러주세요. 서버까지 갔다 오는 시간이 절약됩니다.
+- 길이는 프론트에서도 `<audio>`의 `duration`으로 미리 잴 수 있습니다. 미리 거르면 15분짜리 파일을 올리는 시간 자체가 없어집니다.
+
 ```json
 { "success": true, "project_id": 12, "evaluation_id": 5,
   "slide_number": 3,
   "overall_scores": { "accuracy": 87.4, "fluency": 82.1,
                       "completeness": 95.0, "pronunciation_score": 84.3 },
+  "grades":         { "accuracy": "B",  "fluency": "B",
+                      "completeness": "A", "pronunciation_score": "B" },
+  "reference_text": "Slide 1: 안녕하세요 ...",
   "recognized_text": "실제로 인식된 문장",
-  "words_detail": [{ "word": "발전", "accuracy_score": 52.0, "error_type": "Mispronunciation" }] }
+  "words_detail": [{ "word": "발전", "accuracy_score": 52.0, "error_type": "Mispronunciation",
+                     "reference_span": [12, 14], "recognized_span": [10, 12] }] }
 ```
-- 점수는 **소수 1자리(0~100)**. 그대로 표시하면 됩니다. 종합 점수는 `pronunciation_score`.
+- ⚠️ 응답은 **`data`로 감싸지 않고 평평하게** 내려옵니다. (AI 피드백 API만 `data`로 감쌉니다)
+- 좌우 대조 화면의 하이라이트는 `reference_span` / `recognized_span`으로 칠합니다 — 자세한 규칙은 위 [3. 발음 주의 단어](#3-발음-주의-단어-post-apianalysiswords) 항목과 동일합니다. 오프셋 기준은 **응답의 `reference_text`**입니다.
+- 🔴 **화면에는 등급(`grades`)만 표기합니다.** 숫자 점수는 화면에 쓰지 마세요 (제품 결정, 2026-08-09).
+  - 예외는 종합 점수의 **원형 게이지 하나**입니다. 게이지 호(arc)를 몇 % 채울지 계산하려면 0~100 숫자가 필요해서 `pronunciation_score`를 씁니다. **게이지 안에 적는 글자는 등급**이고, 숫자는 채우는 비율 계산에만 쓰세요.
+- 점수는 **소수 1자리(0~100)**로 계속 내려갑니다. 위 게이지 계산과 기록 보관용입니다.
+- **`grades`** — 같은 점수를 A~F로 환산한 값입니다(피그마 Feedback Page ㊶). 기준은 서버가 한 곳에서 정합니다:
+
+  | 등급 | 점수 |
+  |---|---|
+  | A | 90 이상 |
+  | B | 80 이상 |
+  | C | 70 이상 |
+  | D | 60 이상 |
+  | F | 60 미만 |
+
+  `GET /api/evaluations`와 `GET /api/projects/{id}`의 평가 이력에도 같은 `grades`가 들어 있습니다. 코칭 내역 목록도 등급으로 표기하세요.
 - `recognized_text`와 원본 대본을 좌우로 놓으면 "원본 ↔ 인식 텍스트" 비교 화면이 됩니다.
 - `error_type`: `None`(정상) / `Mispronunciation`(틀림) / `Omission`(안 읽음).
 - 중간에 멈춰도 **읽은 부분까지만** 채점됩니다. 어디까지 읽었는지 알려줄 필요 없습니다.
