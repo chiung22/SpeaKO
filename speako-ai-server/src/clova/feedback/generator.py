@@ -125,9 +125,14 @@ def parse_feedback_sections(text):
 #     한 번 겪은 문제와 같은 종류다(위 STRONG_WORD_THRESHOLD 주석 참고).
 _TIP_KEYS = ("consonant", "ending", "intonation", "speed")
 
-# 피그마 Coach View Page는 팁 카드를 **3개** 그린다. 프롬프트도 "정확히 3줄"을 요구하지만
-# 모델이 종종 4줄을 준다(실측: 제로 녹음 피드백이 4개). 넘치면 화면 레이아웃이 깨지므로 코드로 자른다.
-MAX_PRACTICE_TIPS = 3
+# 피그마 Coach View Page / Feedback Page가 팁 카드를 **4개** 그린다
+# (2026-08-09 갱신본 ㊹: "음성 파일 AI 피드백 (자음/끝소리/강세억양/속도)").
+# 넘치면 화면 레이아웃이 깨지므로 코드로 자른다.
+#
+# ⚠️ 예전엔 3이었다. 8/06 시점 피그마가 카드 3개였고, 모델이 4줄을 주길래 잘랐던 것이다.
+#    그런데 8/09 갱신본은 `_TIP_KEYS`와 정확히 같은 4분류를 카드로 그린다 — 3으로 두면
+#    분류 하나(대개 speed)가 통째로 잘려 나간다(실측: 제로 녹음 피드백에서 속도 팁 누락).
+MAX_PRACTICE_TIPS = 4
 
 
 def normalize_practice_tips(tips):
@@ -164,6 +169,92 @@ def normalize_practice_tips(tips):
     return normalized[:MAX_PRACTICE_TIPS]
 
 
+# ── 근거 없는 음운 단정 걸러내기 ──────────────────────────────────────────────
+#
+# Azure가 주는 건 **단어별 정확도 점수와 오류 유형(None/Mispronunciation/Omission)뿐**이다.
+# *어떤 소리를* 어떻게 틀렸는지는 측정되지 않는다. 한국어(ko-KR)는 음소 이름도 오지 않는다
+# (Azure 문서: phoneme name은 en-US(IPA)와 en-US·zh-CN(SAPI)만 지원, 그 외 로케일은 점수만).
+#
+# 그런데 모델은 빈칸을 상상으로 채운다. 실측(2026-08-09, 제로 녹음):
+#   "'중요성을', '유연한', '마음으로' 등에서 받침을 생략하거나 잘못 발음하는 경우가 있습니다"
+#   "숫자 '7'을 발음할 때 영어식 발음이 아닌 한글 표기에 맞게 발음해야 합니다"
+# 둘 다 서버가 알 수 없는 내용이다. 발음 교정 제품에서 **틀린 교정을 자신 있게 말하는 것**은
+# 아무 말도 안 하는 것보다 나쁘다.
+#
+# 프롬프트로 금지하는 게 1차 방어지만, 모델은 언젠가 다시 지어낸다. 그래서 생성된 뒤에도 거른다.
+_MECHANISM_TERMS = (
+    "받침", "연음", "경음화", "격음화", "비음화", "유음화", "구개음화",
+    "된소리", "거센소리", "장음", "단음", "장단음", "영어식", "탈락", "축약",
+    "혀", "입술", "성대", "모음", "자음", "발음기호", "흐릿", "뭉개",
+    "끝소리", "첫소리", "억양", "강세", "조음", "발성",
+)
+
+# 문장 분리 — 한 항목이 여러 문장인 경우가 흔하다. 통째로 버리면 멀쩡한 내용까지 날아간다.
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
+
+
+def _asserts_unmeasured_cause(line: str) -> bool:
+    """측정되지 않은 **발음 메커니즘을 서술**하는 문장인가.
+
+    처음엔 "단어를 따옴표로 지목했고 + 음운 용어가 있을 때"만 걸렀는데, 실호출에서 이게
+    샜다(2026-08-09): *"여러 단어에서 끝소리가 제대로 처리되지 않은 것으로 보입니다"* —
+    단어를 지목하지 않았을 뿐 여전히 알 수 없는 내용이다. 그래서 **음운 용어가 있으면 자른다.**
+
+    ⚠️ 이 규칙은 총평·잘한 점·개선할 점에만 적용한다. **연습 팁은 제외** — 거기는 피그마가
+    자음/끝소리/강세억양/속도 네 카드를 그리는 자리라 그 단어들이 나오는 게 정상이다.
+    즉 **"과거에 이렇게 틀렸다"(근거 없음)와 "앞으로 이렇게 연습하라"(일반 조언)를 칸으로
+    가른다.** 조언이 개선할 점에서 잘려도 연습 팁이 같은 말을 하므로 화면에서 사라지지 않는다.
+    """
+    if not line:
+        return False
+    return any(term in line for term in _MECHANISM_TERMS)
+
+
+def _grounded_improvement(weak_words) -> str:
+    """전부 걸러졌을 때 대신 넣을, **점수만으로 쓴** 문장.
+
+    빈 목록을 그대로 두면 화면의 '개선할 점'이 통째로 비어 사용자는 평가가 실패한 줄 안다.
+    """
+    named = [w["word"] for w in (weak_words or [])[:3] if w.get("word")]
+    if not named:
+        return "낮은 점수를 받은 단어가 뚜렷하지 않습니다. 전체적으로 조금 더 또박또박 읽어보세요."
+    listed = ", ".join(f"'{word}'" for word in named)
+    return f"{listed}의 정확도가 낮았습니다. 한 음절씩 천천히 또박또박 읽어보세요."
+
+
+def drop_unsupported_claims(sections, weak_words=()):
+    """측정되지 않은 원인을 단정한 문장을 걷어낸다.
+
+    **연습 팁은 건드리지 않는다.** 피그마가 자음/끝소리/강세억양/속도 네 카드를 그리므로
+    "받침이 있는 단어에서 자음을 끝까지 발음하세요" 같은 **일반 조언**은 정상이다.
+    문제는 특정 단어를 지목하고 원인을 붙이는 것이지, 자음을 언급하는 것 자체가 아니다.
+    """
+    if not sections:
+        return sections
+
+    def _keep_clean_sentences(text: str) -> str:
+        """문제 있는 문장만 떼어낸다. 항목 하나가 여러 문장인 경우가 흔하기 때문이다.
+
+        실측 예: "몇몇 단어에서 발음이 부정확했으며, 특히 '언제든지'처럼 짧은 단어조차 낮은
+        점수를 기록했습니다. 또한 여러 단어에서 끝소리가 제대로 처리되지 않은 것으로 보입니다."
+        → 앞 문장은 점수 그대로라 사실이고, 뒤 문장만 근거가 없다.
+        """
+        kept = [s for s in _SENTENCE_SPLIT.split(text) if s.strip() and not _asserts_unmeasured_cause(s)]
+        return " ".join(kept).strip()
+
+    for key in ("strengths", "improvements"):
+        cleaned = (_keep_clean_sentences(line) for line in sections.get(key) or [])
+        sections[key] = [line for line in cleaned if line]
+
+    sections["summary"] = _keep_clean_sentences(sections.get("summary") or "")
+
+    # 지적이 통째로 사라지면 화면이 빈다 — 점수만으로 쓸 수 있는 문장으로 채운다.
+    if not sections["improvements"]:
+        sections["improvements"] = [_grounded_improvement(weak_words)]
+
+    return sections
+
+
 class PronunciationFeedbackGenerator:
     def __init__(self):
         self.api_key = os.getenv("HCX_API_KEY")
@@ -182,7 +273,15 @@ class PronunciationFeedbackGenerator:
         2. 지적도 칭찬도 반드시 아래에 주어진 단어 목록만 근거로 삼으세요.
            목록에 없는 단어를 골라 "잘 발음했습니다"라고 하거나 지적하지 마세요.
            대본은 맥락 파악용일 뿐이며, 대본에서 단어를 골라 평가하면 안 됩니다.
-        3. 개선점은 "무엇을 어떻게" 하라는 행동으로 쓰세요. (예: "받침 ㄴ을 끝까지 발음하세요")
+        3. ⚠️ **가장 중요합니다 — 우리는 "어느 단어가 몇 점인지"만 압니다.**
+           그 단어를 **어떻게** 잘못 발음했는지는 측정되지 않았습니다. 그러므로 특정 단어를
+           지목하면서 원인을 단정하지 마세요. 아래는 전부 **금지**입니다.
+             ✗ "'유연한'에서 받침을 생략했습니다"      ← 받침을 생략했는지 알 수 없음
+             ✗ "'마음으로'의 연음이 부자연스럽습니다"   ← 연음 여부는 측정되지 않음
+             ✗ "숫자 '7'을 영어식으로 발음했습니다"     ← 어떻게 읽었는지 알 수 없음
+           대신 **관찰된 사실 + 행동**으로 쓰세요.
+             ✓ "'유연한', '마음으로'가 낮은 정확도를 받았습니다. 한 음절씩 또박또박 읽어보세요."
+             ✓ "'언제든지'는 특히 낮았습니다(28점). 천천히 반복해서 연습해보세요."
         4. 격려하되 과장하지 마세요. 점수가 낮으면 낮다고 정직하게 말하세요.
         5. 존댓말(~습니다/~하세요)로 쓰고, 각 항목은 한 문장으로 간결하게 쓰세요.
 
@@ -198,9 +297,11 @@ class PronunciationFeedbackGenerator:
         - (1~3개)
 
         [연습 팁]
-        정확히 3줄. 각 줄은 `분류 | 제목 | 설명` 형식으로 쓰세요.
+        정확히 4줄. 각 줄은 `분류 | 제목 | 설명` 형식으로 쓰세요.
         분류는 consonant(자음) / ending(끝소리) / intonation(강세·억양) / speed(속도)
-        중에서만 고르고, 서로 다른 분류 3개를 쓰세요. 제목은 10자 이내입니다.
+        **네 가지를 각각 한 줄씩** 쓰세요(순서는 이대로). 제목은 10자 이내입니다.
+        연습 팁은 **일반적인 연습 방법**이므로 여기서는 자음·끝소리를 언급해도 됩니다.
+        다만 **특정 단어를 지목하지는 마세요** (그 단어를 어떻게 틀렸는지는 모르기 때문입니다).
         **목소리 크기(성량)에 대한 조언은 쓰지 마세요.** 녹음 음량은 마이크 거리에 좌우돼서
         발표자의 실제 성량을 알 수 없고, 주어진 점수에도 성량 정보가 없습니다.
         예) consonant | 명확한 자음 발음 | 'ㄷ, ㅈ, ㅅ' 계열 자음을 더 또렷하게 발음해보세요.
@@ -245,7 +346,9 @@ class PronunciationFeedbackGenerator:
                 usage.get("completionTokens", 0),
                 usage.get("totalTokens", 0),
             )
-            return parse_feedback_sections(result["result"]["message"]["content"])
+            sections = parse_feedback_sections(result["result"]["message"]["content"])
+            # 프롬프트로 금지해도 모델은 언젠가 다시 지어낸다. 생성된 뒤에도 한 번 더 거른다.
+            return drop_unsupported_claims(sections, weak_words or [])
         except Exception as e:
             print(f"❌ 발음 피드백 생성 API 호출 중 에러가 발생했습니다: {e}")
             return None
