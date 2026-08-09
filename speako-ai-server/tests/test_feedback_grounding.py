@@ -64,6 +64,23 @@ def test_keeps_score_based_lines(line):
     assert result["improvements"] == [line]
 
 
+def test_drops_the_whole_item_when_its_first_sentence_goes():
+    """⚠️ 앞문장을 잘라내고 뒤만 남기면 **말이 안 되는 조각**이 화면에 남는다.
+
+    실측(2026-08-09 재검증): "숫자 '7'을 영어식으로 발음하셨습니다. 한국어로 자연스럽게
+    발음하도록 주의하시기 바랍니다." 에서 앞문장만 걸렀더니, 한국어 발표인데 "한국어로
+    발음하라"는 말만 남았다. 뒷문장은 앞문장에 기대어 쓰이므로 항목째 버려야 한다.
+    """
+    item = ("숫자 '7'을 영어식으로 발음하셨습니다. "
+            "한국어로 자연스럽게 발음하도록 주의하시기 바랍니다.")
+    result = drop_unsupported_claims(
+        {"summary": "", "strengths": [item], "improvements": ["'가나다'의 정확도가 낮았습니다."],
+         "practice_tips": []},
+        weak_words=[],
+    )
+    assert result["strengths"] == []
+
+
 def test_keeps_the_grounded_half_of_a_mixed_item():
     """한 항목에 사실과 날조가 섞여 있으면 **사실만** 남긴다. 통째로 버리면 손해다."""
     line = ("몇몇 단어에서 발음이 부정확했으며, 특히 '언제든지'처럼 짧은 단어조차 "

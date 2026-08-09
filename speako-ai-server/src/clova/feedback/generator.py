@@ -242,10 +242,34 @@ def drop_unsupported_claims(sections, weak_words=()):
         kept = [s for s in _SENTENCE_SPLIT.split(text) if s.strip() and not _asserts_unmeasured_cause(s)]
         return " ".join(kept).strip()
 
+    def _clean_item(item: str) -> str:
+        """목록 항목 하나를 정리한다. **첫 문장이 잘리면 항목을 통째로 버린다.**
+
+        뒷문장은 앞문장에 기대어 쓰인다. 앞을 잘라내고 뒤만 남기면 말이 안 되는 조각이 화면에
+        남는다 — 실측(2026-08-09 재검증):
+
+            원문: "숫자 '7'을 영어식으로 발음하셨습니다. 한국어로 자연스럽게 발음하도록
+                   주의하시기 바랍니다."
+            앞문장만 걸러낸 결과: "한국어로 자연스럽게 발음하도록 주의하시기 바랍니다."
+            → 한국어 발표에서 "한국어로 발음하라"는 말만 남아 무슨 뜻인지 알 수 없다.
+
+        반대로 **첫 문장이 살아남았다면 뒤만 잘라내도 괜찮다.** 첫 문장이 그 항목의 주장을
+        담고 있고 뒷문장은 부연이기 때문이다:
+
+            "…특히 '언제든지'처럼 짧은 단어조차 낮은 점수를 기록했습니다."  ← 남긴다
+            "또한 여러 단어에서 끝소리가 제대로 처리되지 않은 것으로 보입니다."  ← 버린다
+        """
+        sentences = [s.strip() for s in _SENTENCE_SPLIT.split(item) if s.strip()]
+        if not sentences or _asserts_unmeasured_cause(sentences[0]):
+            return ""
+        return " ".join(s for s in sentences if not _asserts_unmeasured_cause(s))
+
     for key in ("strengths", "improvements"):
-        cleaned = (_keep_clean_sentences(line) for line in sections.get(key) or [])
+        cleaned = (_clean_item(line) for line in sections.get(key) or [])
         sections[key] = [line for line in cleaned if line]
 
+    # 총평은 목록이 아니라 이어지는 산문이라 문장 단위로만 거른다. 첫 문장을 이유로 통째로
+    # 버리면 총평 칸이 비는데, 그건 조각이 남는 것보다 나쁘다.
     sections["summary"] = _keep_clean_sentences(sections.get("summary") or "")
 
     # 지적이 통째로 사라지면 화면이 빈다 — 점수만으로 쓸 수 있는 문장으로 채운다.
