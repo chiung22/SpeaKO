@@ -9,7 +9,14 @@ from utils.usage_tracker import log_azure_speech_call
 # .env 파일 로드
 load_dotenv()
 
-CONTINUOUS_RECOGNITION_TIMEOUT_SECONDS = 300  # 여러 슬라이드를 이어 읽는 긴 녹음까지 대응
+# 연속 인식이 끝나기를 기다리는 상한. **Azure가 정한 값이 아니라 우리 코드의 값이다**
+# (아래 `done.wait()`는 파이썬 threading.Event다).
+#
+# 어떻게 정했나: Azure는 오디오를 실시간의 약 0.48배 속도로 처리한다(실측: 5분 녹음 → 148초).
+# 업로드 길이 상한이 15분(main.MAX_AUDIO_DURATION_SECONDS)이므로 필요한 시간은 약 435초다.
+# 여기에 2배 여유를 둔 값이 900초다. 둘 중 하나를 바꾸면 다른 하나도 같이 봐야 한다
+# (tests/test_audio_limits.py가 이 관계를 회귀 테스트로 고정하고 있다).
+CONTINUOUS_RECOGNITION_TIMEOUT_SECONDS = 900
 
 
 def _get_wav_duration_seconds(path: str) -> float:
@@ -110,8 +117,24 @@ class PronunciationEvaluator:
 
             # 4. 음성 인식 및 평가 실행 (파일 끝까지 연속 인식)
             speech_recognizer.start_continuous_recognition()
-            done.wait(timeout=CONTINUOUS_RECOGNITION_TIMEOUT_SECONDS)
+            finished = done.wait(timeout=CONTINUOUS_RECOGNITION_TIMEOUT_SECONDS)
             speech_recognizer.stop_continuous_recognition()
+
+            # ⚠️ 시간이 초과됐으면 **그때까지 도착한 조각으로 점수를 내면 안 된다.**
+            # 예전엔 wait()의 반환값을 버리고 그대로 집계로 내려갔는데, 그러면 20분 녹음의
+            # 앞부분만 처리하고도 정상 완료와 구분이 안 됐다(status: success). 게다가 완성도는
+            # 대본 전체 기준이라, 사용자는 "뒤를 안 읽었다"는 낮은 점수를 받는다 — 실제로는
+            # 서버가 안 들은 것이다. 성공처럼 보이는 실패가 제일 나쁘므로 명시적으로 끊는다.
+            if not finished:
+                log_azure_speech_call(audio_seconds, "timeout")
+                return {
+                    "status": "error",
+                    "message": (
+                        f"녹음이 길어 평가 시간이 초과됐습니다. "
+                        f"({CONTINUOUS_RECOGNITION_TIMEOUT_SECONDS}초 내 미완료) "
+                        "슬라이드별로 나눠 녹음해주세요."
+                    ),
+                }
 
             # 5. 결과 집계
             if cancel_messages:

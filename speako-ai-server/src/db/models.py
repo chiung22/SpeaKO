@@ -65,6 +65,9 @@ class ScriptJob(Base):
 
     id = Column(String, primary_key=True)  # uuid4().hex (접수번호)
     status = Column(String, nullable=False, default="processing")  # processing | completed | failed
+    # 피그마 로딩 화면이 그리는 4단계 중 현재 단계(1~4). job_store.STEP_LABELS 참고.
+    # 업로드·추출은 이 작업이 생기기 전에 끝나므로 3(대본 작성)에서 시작한다.
+    step = Column(Integer, nullable=True, default=3)
     data = Column(JSON, nullable=True)   # 완료 시 결과
     error = Column(Text, nullable=True)  # 실패 시 사유
     created_at = Column(DateTime, default=_utcnow, nullable=False)

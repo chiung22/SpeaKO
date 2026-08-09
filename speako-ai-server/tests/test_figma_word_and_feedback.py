@@ -267,9 +267,12 @@ def test_summary_matches_returned_word_count(db_session_factory):
     assert sum(data["summary"].values()) == len(data["words"])
 
 
-def test_practice_tips_are_capped_at_three():
-    """피그마는 팁 카드를 3개 그린다. 프롬프트가 '정확히 3줄'을 요구해도 모델이 4줄을 준다
-    (실측: 제로 녹음 피드백이 4개). 넘치면 레이아웃이 깨지므로 코드로 자른다."""
+def test_practice_tips_keep_all_four_categories():
+    """피그마 갱신본(2026-08-09) ㊹는 팁 카드를 **4개** 그린다 — 자음/끝소리/강세억양/속도.
+
+    ⚠️ 예전엔 3개로 자르는 테스트였다. 8/06 시점 피그마가 카드 3개였기 때문인데, 그 상한이
+    남아 있으면 분류 하나(대개 speed)가 통째로 잘려 나간다(실측: 제로 녹음 피드백에서 속도 팁 누락).
+    """
     from clova.feedback.generator import normalize_practice_tips
 
     tips = normalize_practice_tips([
@@ -279,5 +282,14 @@ def test_practice_tips_are_capped_at_three():
         "speed | 속도 | 설명4.",
     ])
 
-    assert len(tips) == 3
-    assert [t["key"] for t in tips] == ["consonant", "ending", "intonation"]
+    assert len(tips) == 4
+    assert [t["key"] for t in tips] == ["consonant", "ending", "intonation", "speed"]
+
+
+def test_practice_tips_are_capped_at_four():
+    """모델이 5줄 이상 주면 레이아웃이 깨지므로 코드로 자른다."""
+    from clova.feedback.generator import normalize_practice_tips
+
+    tips = normalize_practice_tips([f"consonant | 제목{i} | 설명{i}." for i in range(8)])
+
+    assert len(tips) == 4

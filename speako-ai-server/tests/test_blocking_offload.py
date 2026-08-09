@@ -141,12 +141,43 @@ def test_coaching_text_extraction_runs_off_the_event_loop(monkeypatch):
     assert record["coaching"] == "worker-thread"
 
 
+def test_tts_synthesis_runs_off_the_event_loop(monkeypatch, db_session_factory):
+    """Clova Voice 합성은 requests.post로 최대 30초까지 블로킹한다(REQUEST_TIMEOUT_SECONDS)."""
+    db = db_session_factory()
+    try:
+        project = models.Project(name="TTS 오프로드", filename=None, topic=None, keywords=[])
+        project.slides = [models.Slide(slide_number=1, source_content="원문", script="각자 책임을 다합시다.")]
+        db.add(project)
+        db.commit()
+        db.refresh(project)
+        project_id = project.id
+        db.add(models.DifficultWord(project_id=project_id, word="각자", phoneme="[각짜]",
+                                    category="표기-발음불일치", description="경음화"))
+        db.commit()
+    finally:
+        db.close()
+
+    record = {}
+    note = _where_did_it_run(record, "tts")
+
+    def _fake_synthesize(text, speaker="ndain"):
+        note()
+        return b"fake mp3 bytes"
+
+    monkeypatch.setattr(main.tts_client, "synthesize_bytes", _fake_synthesize)
+
+    response = client.post("/api/tts/word", json={"project_id": project_id, "word": "각자"})
+    assert response.status_code == 200
+    assert record["tts"] == "worker-thread"
+
+
 @pytest.mark.parametrize("handler_name", [
     "create_project",
     "extract_and_convert_words",
     "evaluate_pronunciation",
     "create_full_script",
     "create_partial_script",
+    "synthesize_word_pronunciation",
 ])
 def test_blocking_handlers_stay_async(handler_name):
     """이 핸들러들이 `def`로 바뀌면 FastAPI가 통째로 스레드풀에 넣어버려서

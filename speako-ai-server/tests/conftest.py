@@ -40,6 +40,17 @@ def _isolate_stdict(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_tts_cache(monkeypatch, tmp_path):
+    """TTS 캐시가 실제 data/tts_cache에 파일을 남기지 않도록 테스트마다 격리한다.
+
+    격리하지 않으면 (1) 테스트가 개발자 머신에 캐시 파일을 쌓고 (2) 앞 테스트가 채워둔 캐시
+    때문에 뒤 테스트가 합성 호출을 건너뛰어, "합성이 불렸는가"를 보는 검증이 조용히 통과한다.
+    """
+    from tts import tts_cache
+    monkeypatch.setattr(tts_cache, "CACHE_DIR", str(tmp_path / "tts_cache"))
+
+
+@pytest.fixture(autouse=True)
 def db_session_factory():
     """
     테스트가 실제 speako-ai-server/data/speako.db를 건드리지 않도록,
