@@ -27,6 +27,7 @@ _EXPENSIVE_PREFIXES = (
     "/api/script/",     # HCX 대본 생성
     "/api/analysis/",   # ETRI + 표준국어대사전
     "/api/evaluation/",  # Azure 발음 평가 + HCX 피드백
+    "/api/tts/",         # Clova Voice 합성 (캐시 미스 시 글자 수만큼 과금)
 )
 
 

@@ -8,6 +8,7 @@ if sys.stdout.encoding.lower() != "utf-8":
 
 from fastapi import FastAPI, APIRouter, UploadFile, File, Form, Header, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -18,6 +19,7 @@ import os
 import re
 import uuid
 import hmac
+from urllib.parse import quote
 
 # 1. 분리해둔 AI 클라이언트 모듈들 임포트
 from clova.full_generation.generator import FullScriptGenerator
@@ -32,6 +34,8 @@ from etri.etri_client import EtriLanguageAnalyzer
 from nlp.kiwi_analyzer import KiwiAnalyzer
 from g2p.g2p_client import G2pConverter
 from azure_speech.azure_client import PronunciationEvaluator
+from tts.clova_voice_client import ClovaVoiceClient
+from tts import tts_cache
 from utils.ppt_extractor import PptExtractor
 from utils import pdf_extractor
 from utils import docx_extractor
@@ -40,6 +44,8 @@ from utils.text_heuristics import extract_frequent_terms
 from utils.stdict_client import StdictClient
 from utils.hangul_phonology import has_liaison_pattern
 from utils import phonology_rules
+from utils import score_grade
+from utils import docx_builder
 from utils.body_limit import MaxBodySizeMiddleware
 from utils.rate_limit import RateLimitMiddleware
 from db.database import get_db, init_db, SessionLocal
@@ -85,11 +91,25 @@ origins = _parse_origins(os.getenv("CORS_ALLOW_ORIGINS", ""))
 
 # 업로드 파일 제한 (DoS 방지)
 MAX_PPT_SIZE_BYTES = 20 * 1024 * 1024   # 20MB
-MAX_AUDIO_SIZE_BYTES = 10 * 1024 * 1024  # 10MB
+MAX_AUDIO_SIZE_BYTES = 20 * 1024 * 1024  # 20MB
+# 녹음 **길이** 상한. 크기 상한과 별개로 필요하다.
+#
+# 왜 크기만으로는 안 되나: 같은 20MB라도 비트레이트에 따라 재생 길이가 3배 넘게 벌어진다
+# (실측: 124kbps m4a는 21분, 브라우저 webm/opus 40kbps는 67분). 그런데 Azure 발음 평가는
+# **오디오 길이에 비례**해서 시간을 먹으므로(실측: 5분 녹음 → 148초, 실시간의 약 0.48배),
+# 크기로만 막으면 처리 시간이 사실상 무제한이 된다.
+#
+# 이 값을 넘는 파일은 **Azure를 부르기 전에** 거절한다 — 안 그러면 돈은 다 쓰고 뒷부분이
+# 잘린 결과를 돌려주게 된다. 15분이면 평가에 약 7분 걸린다(15×60×0.48 ≈ 435초).
+MAX_AUDIO_DURATION_SECONDS = 15 * 60
 # 요청 본문 전체의 상한. 가장 큰 허용 파일(PPT 20MB)에 multipart 경계·필드 오버헤드를 더한 값.
 # 파일 단위 제한(_save_upload_with_limit)은 본문이 이미 전부 파싱된 뒤에야 도므로 이것만으론
 # 부족하다 — 그 전에 ASGI 레벨에서 끊는 용도다. (utils/body_limit.py 주석 참고)
 MAX_REQUEST_BODY_BYTES = int(os.getenv("MAX_REQUEST_BODY_MB", "25")) * 1024 * 1024
+# 구버전 `.ppt`(2007년 이전 OLE 바이너리)는 **지원하지 않는다**(사용자 결정, 2026-08-09).
+# python-pptx가 OOXML만 읽어서 변환기(LibreOffice)를 서버에 얹어야 하는데, 시연까지 남은
+# 기간에 배포 이미지를 키울 만한 가치가 없다고 판단했다. 대신 올렸을 때 무엇을 하면 되는지
+# 알려준다(_save_upload_with_limit의 415 안내 참고).
 ALLOWED_PPT_EXTENSIONS = {".pptx", ".pdf"}
 ALLOWED_COACHING_EXTENSIONS = {".docx", ".txt", ".pdf"}
 # 브라우저 MediaRecorder는 기본적으로 webm/opus(Chrome·Firefox·Edge)나 mp4/m4a(Safari)로 녹음한다.
@@ -109,6 +129,9 @@ MAX_TOPIC_LEN = 200                 # 발표 주제 (한 줄)
 MAX_AUDIENCE_LEN = 100              # 발표 대상 (예: "교수님", "면접관")
 MAX_EXTRA_REQUIREMENT_LEN = 1_000   # 추가 요구사항 자유 텍스트
 MAX_PROJECT_NAME_LEN = 200
+# TTS 합성 대상 텍스트. Clova Voice는 **글자 수만큼 과금**되므로 상한이 곧 호출 1회당 비용 상한이다.
+# 이 엔드포인트는 단어 목록의 스피커 버튼용이라 실제로는 2~5자면 충분하다.
+MAX_TTS_TEXT_LEN = 100
 # 발표 시간은 생성할 대본 분량을 좌우한다 = 토큰 비용에 직결된다.
 MAX_PRESENTATION_MINUTES = 180
 # 대본 생성은 슬라이드 한 장당 HCX 호출 1회다. 길이 상한은 장당 분량만 막지 개수는 못 막으므로,
@@ -156,10 +179,26 @@ def _safe_temp_path(original_filename: str) -> str:
     return f"temp_{uuid.uuid4().hex}{ext}"
 
 
-def _save_upload_with_limit(upload_file: UploadFile, dest_path: str, max_bytes: int, allowed_extensions: set):
-    """확장자를 검사하고, 크기 제한을 지키며 업로드 파일을 디스크에 저장합니다."""
+def _save_upload_with_limit(upload_file: UploadFile, dest_path: str, max_bytes: int, allowed_extensions: set,
+                            hint: str = ""):
+    """확장자를 검사하고, 크기 제한을 지키며 업로드 파일을 디스크에 저장합니다.
+
+    hint: 상한을 넘었을 때 "그래서 뭘 하면 되는지"를 덧붙인다. 크기만 알려주면 사용자는
+          파일을 줄일 방법을 스스로 찾아야 한다.
+    """
     ext = os.path.splitext(upload_file.filename or "")[1].lower()
     if ext not in allowed_extensions:
+        # 구버전 .ppt는 흔한 실수라 따로 안내한다. 목록만 보여주면 사용자는 왜 자기 PPT가
+        # 거절됐는지 모른다(확장자가 .ppt인 걸 인식 못 하는 경우가 많다).
+        if ext == ".ppt":
+            raise HTTPException(
+                status_code=415,
+                detail=(
+                    "구버전 .ppt 형식은 지원하지 않습니다. "
+                    "PowerPoint에서 '다른 이름으로 저장 → PowerPoint 프레젠테이션(.pptx)'으로 "
+                    "바꿔서 올려주세요."
+                ),
+            )
         raise HTTPException(
             status_code=415,
             detail=f"허용되지 않는 파일 형식입니다. ({', '.join(sorted(allowed_extensions))}만 허용)"
@@ -175,7 +214,7 @@ def _save_upload_with_limit(upload_file: UploadFile, dest_path: str, max_bytes: 
             if total_bytes > max_bytes:
                 raise HTTPException(
                     status_code=413,
-                    detail=f"파일 크기가 너무 큽니다. (최대 {max_bytes // (1024 * 1024)}MB)"
+                    detail=f"파일 크기가 너무 큽니다. (최대 {max_bytes // (1024 * 1024)}MB){hint}"
                 )
             buffer.write(chunk)
 
@@ -189,6 +228,7 @@ azure_evaluator = PronunciationEvaluator()
 feedback_generator = PronunciationFeedbackGenerator()
 ppt_extractor = PptExtractor()
 stdict_client = StdictClient()
+tts_client = ClovaVoiceClient()
 
 # 5. DB 테이블 생성 (없으면 생성, 있으면 그대로 둠)
 init_db()
@@ -261,6 +301,21 @@ class PartialScriptRequest(BaseModel):
 
 class AnalysisRequest(BaseModel):
     project_id: int = Field(..., ge=1)
+
+class ProjectUpdateRequest(BaseModel):
+    """프로젝트명 수정(피그마 AI Script Edit Page ⑬). 이 이름이 docx 다운로드 파일명이 된다."""
+    name: str = Field(..., min_length=1, max_length=MAX_PROJECT_NAME_LEN)
+
+class TtsWordRequest(BaseModel):
+    """단어 목록 화면의 스피커 버튼 → 이 단어를 소리로 들려준다.
+
+    `pronunciation`을 주면 그걸 그대로 합성하고, 없으면 서버가 발음을 찾아낸다
+    (저장된 발음기호 → 즉석 G2P 순). 철자 그대로 들려주고 싶으면 `pronunciation`에
+    철자를 넣으면 된다 — 정책이 바뀌어도 클라이언트가 선택할 수 있게 열어둔 자리다.
+    """
+    word: str = Field(..., min_length=1, max_length=MAX_TTS_TEXT_LEN)  # 철자 (화면에 보이는 단어)
+    project_id: Optional[int] = Field(None, ge=1)  # 있으면 이 프로젝트에 저장된 발음기호를 먼저 찾는다
+    pronunciation: Optional[str] = Field(None, max_length=MAX_TTS_TEXT_LEN)  # 직접 지정할 발음. '[여칼]' 형태도 허용
 
 class SlideUpdateRequest(BaseModel):
     """결과 화면(피그마 05)에서 사용자가 직접 고친 대본을 저장할 때 쓴다. PPT O는 슬라이드별,
@@ -365,7 +420,7 @@ def _extract_coaching_text(temp_file_path: str, ext: str) -> str:
 
 
 def _extract_slide_data(temp_file_path: str, ext: str, topic_hint: str, outline_hint: str) -> dict:
-    """슬라이드 파일(PPTX/PDF) → 구조화 데이터. 동기 블로킹이라 스레드풀에서 부른다.
+    """슬라이드 파일(PPT/PPTX/PDF) → 구조화 데이터. 동기 블로킹이라 스레드풀에서 부른다.
 
     PPTX 경로는 이미지 전용 장표를 만나면 **HCX 비전을 유료로 호출**한다(슬라이드당 최대 3장).
     네트워크 왕복이 여러 번 일어나므로 이벤트 루프에서 직접 돌리면 안 된다.
@@ -594,7 +649,14 @@ async def get_script_job(job_id: str):
     if job is None:
         raise HTTPException(status_code=404, detail="해당 작업을 찾을 수 없습니다.")
 
-    response = {"success": True, "job_id": job_id, "status": job["status"]}
+    # 피그마 AI Set Page (Loading)이 진행을 4단계로 그린다. status만으로는 "처리중"밖에
+    # 못 그리므로 현재 단계도 함께 준다(job_store.STEP_LABELS).
+    response = {
+        "success": True, "job_id": job_id, "status": job["status"],
+        "step": job["step"],
+        "total_steps": job_store.TOTAL_STEPS,
+        "step_label": job_store.step_label(job["step"]),
+    }
     if job["status"] == "completed":
         # 완료 시 응답은 기존 동기 방식과 동일한 모양({project_id, data})을 그대로 담는다.
         response["project_id"] = job["data"]["project_id"]
@@ -722,6 +784,89 @@ async def extract_and_convert_words(request: AnalysisRequest, db: Session = Depe
 
     return {"success": True, "project_id": project.id, "data": {"words": words_payload, "summary": summary}}
 
+
+# 합성에 쓸 화자. 'ndain'은 신뢰감 있는 톤의 한국어 여성 아나운서 음색.
+TTS_SPEAKER = os.getenv("CLOVA_VOICE_SPEAKER", "ndain")
+
+
+def _clean_tts_text(text: str) -> str:
+    """발음기호를 Clova Voice에 그대로 넣을 수 있는 평문으로 다듬는다.
+
+    - 대괄호를 벗긴다: '[여칼]' → '여칼' (G2P 결과는 항상 대괄호로 감싸여 있다)
+    - 장음 기호(ː)를 뺀다. Clova Voice 입력은 평문이라 ː를 표현할 방법이 없고, 남겨두면
+      모르는 문자가 그대로 발음에 섞인다. 대신 장단음 정보는 소리에서 빠지는데, 장단음 단어는
+      대개 철자=발음이라(밤/밤ː) 일반 읽기와 같아진다 — 틀린 소리가 나가진 않는다.
+    """
+    cleaned = phonology_rules.strip_brackets(text or "")
+    cleaned = cleaned.replace(phonology_rules.LENGTH_MARK, "")
+    return " ".join(cleaned.split())[:MAX_TTS_TEXT_LEN]
+
+
+def _stored_pronunciation(db: Session, project_id: int, word: str) -> str:
+    """/api/analysis/words가 이미 저장해 둔 발음기호를 꺼낸다. 없으면 빈 문자열."""
+    row = (
+        db.query(models.DifficultWord)
+        .filter(models.DifficultWord.project_id == project_id, models.DifficultWord.word == word)
+        .first()
+    )
+    return _clean_tts_text(row.phoneme) if row and row.phoneme else ""
+
+
+@api.post("/api/tts/word")
+async def synthesize_word_pronunciation(request: TtsWordRequest, db: Session = Depends(get_db)):
+    """[발음 듣기 API] 단어의 **표준 발음**을 합성해 MP3 바이트를 그대로 돌려준다.
+
+    ## 왜 철자가 아니라 발음을 보내는가 (2026-08-09 실측)
+    Clova Voice는 한국어 음운 규칙을 **일부만** 적용한다. 네 단어를 철자 그대로 넣어 들어본 결과:
+
+        역할 → [여칼] ✅ 격음화 적용      권리 → [궐리] ✅ 유음화 적용
+        각자 → [각자] ❌ 경음화 미적용    책임 → [책임] ❌ 연음 미적용
+
+    철자를 보내면 '각자'·'책임'처럼 **틀린 발음을 정답이라고 들려주게 된다** — 발음 주의 단어
+    기능이 정확히 거기서 무너진다. 반대로 발음 문자열('각짜'/'채김'/'궐리'/'여칼')은 넷 다 넣은
+    대로 소리가 났고, 이미 규칙이 걸린 '권리'·'역할'에 넣어도 규칙이 이중 적용되지 않았다.
+    그래서 **기본은 발음**이고, 철자로 듣고 싶으면 `pronunciation`에 철자를 넣으면 된다.
+    """
+    word = request.word.strip()
+    if not word:
+        raise HTTPException(status_code=422, detail="합성할 단어가 비어 있습니다.")
+
+    # 발음 결정: 요청에 명시된 값 → 저장된 발음기호 → 즉석 G2P → (전부 실패 시) 철자
+    text = _clean_tts_text(request.pronunciation) if request.pronunciation else ""
+    if not text and request.project_id:
+        text = _stored_pronunciation(db, request.project_id, word)
+    if not text:
+        # G2P는 형태소 분석까지 도는 CPU 작업이라 루프에서 직접 돌리면 서버 전체가 그동안 멈춘다.
+        converted = await run_in_threadpool(g2p_converter.convert_words, [word])
+        text = _clean_tts_text(converted[0]["phoneme"]) if converted else ""
+    if not text:
+        text = word
+
+    # 캐시가 먼저다. Clova Voice는 글자 수만큼 과금되는데, 발음 주의 단어는 프로젝트마다 겹치고
+    # 사용자가 스피커 버튼을 여러 번 누르면 똑같은 요청이 그대로 또 나간다.
+    audio = tts_cache.get(text, TTS_SPEAKER)
+    cache_status = "hit"
+
+    if audio is None:
+        cache_status = "miss"
+        # requests.post는 완전 블로킹이다 (tests/test_blocking_offload.py가 이 계약을 지킨다).
+        audio = await run_in_threadpool(tts_client.synthesize_bytes, text, TTS_SPEAKER)
+        if audio is None:
+            raise HTTPException(status_code=502, detail="발음 음성 합성에 실패했습니다.")
+        tts_cache.put(text, TTS_SPEAKER, audio)
+
+    # 헤더는 latin-1만 담을 수 있어서 한글을 그대로 넣으면 응답 자체가 깨진다. 퍼센트 인코딩한다.
+    return Response(
+        content=audio,
+        media_type="audio/mpeg",
+        headers={
+            "Content-Disposition": f"inline; filename*=UTF-8''{quote(word)}.mp3",
+            "X-TTS-Cache": cache_status,       # 과금 발생 여부(miss = 실제 합성 호출)
+            "X-TTS-Text": quote(text),         # 실제로 합성한 문자열 — 디버깅/검증용
+        },
+    )
+
+
 @api.post("/api/evaluation/audio")
 async def evaluate_pronunciation(
     project_id: int = Form(...),
@@ -744,8 +889,23 @@ async def evaluate_pronunciation(
     try:
         # 업로드된 파일을 로컬 디스크에 임시 복사 (크기/타입 제한 적용)
         await run_in_threadpool(
-            _save_upload_with_limit, audio_file, temp_file_path, MAX_AUDIO_SIZE_BYTES, ALLOWED_AUDIO_EXTENSIONS
+            _save_upload_with_limit, audio_file, temp_file_path, MAX_AUDIO_SIZE_BYTES, ALLOWED_AUDIO_EXTENSIONS,
+            " 슬라이드별로 나눠 녹음하시면 한 번에 올리는 분량이 줄어듭니다.",
         )
+
+        # 길이 상한은 크기 상한과 별개다(MAX_AUDIO_DURATION_SECONDS 주석 참고).
+        # **변환·Azure 호출 전에** 잰다 — 나중에 재면 그 비용이 이미 다 나간 뒤가 된다.
+        # ffprobe는 헤더만 읽지만 subprocess라 블로킹이므로 스레드풀로 넘긴다.
+        audio_seconds = await run_in_threadpool(audio_converter.probe_duration_seconds, temp_file_path)
+        if audio_seconds is not None and audio_seconds > MAX_AUDIO_DURATION_SECONDS:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"녹음이 너무 깁니다. ({audio_seconds / 60:.1f}분 / 최대 "
+                    f"{MAX_AUDIO_DURATION_SECONDS // 60}분) "
+                    "슬라이드별로 나눠 녹음하시면 한 번에 올리는 분량이 줄어듭니다."
+                ),
+            )
 
         project = db.get(models.Project, project_id)
         if not project:
@@ -818,6 +978,9 @@ async def evaluate_pronunciation(
             # 프론트가 어느 텍스트에 대고 칠해야 할지 알 수 없다(대본을 이어붙이며 "Slide N:"
             # 접두어가 붙으므로 프론트가 가진 원본과 인덱스가 다르다).
             "reference_text": text_to_evaluate,
+            # 피그마 Feedback Page ㊶는 점수와 함께 등급(A~F)을 그린다. 프론트가 각자 변환하면
+            # 화면마다 기준이 달라질 수 있어서 서버가 한 곳에서 정한다(utils/score_grade.py).
+            "grades": score_grade.grades_for(result.get("overall_scores")),
             **result,
         }
     except HTTPException:
@@ -917,6 +1080,7 @@ async def list_evaluations(db: Session = Depends(get_db)):
                 "fluency_score": e.fluency_score,
                 "completeness_score": e.completeness_score,
                 "pronunciation_score": e.pronunciation_score,
+                "grades": _evaluation_grades(e),  # A~F (피그마 Feedback Page)
                 "feedback": e.feedback,  # 아직 생성 안 했으면 null
                 "reference_text": e.reference_text,   # 원본 대본
                 "recognized_text": e.recognized_text,  # Azure가 실제로 인식한 텍스트
@@ -958,6 +1122,7 @@ async def get_project(project_id: int, db: Session = Depends(get_db)):
                     "fluency_score": e.fluency_score,
                     "completeness_score": e.completeness_score,
                     "pronunciation_score": e.pronunciation_score,
+                    "grades": _evaluation_grades(e),  # A~F (피그마 Feedback Page)
                     "feedback": e.feedback,  # 아직 생성 안 했으면 null
                     "reference_text": e.reference_text,   # 원본 대본
                     "recognized_text": e.recognized_text,  # Azure가 실제로 인식한 텍스트
@@ -980,6 +1145,100 @@ async def delete_project(project_id: int, db: Session = Depends(get_db)):
     db.delete(project)
     db.commit()
     return {"success": True, "deleted_project_id": project_id}
+
+
+@api.put("/api/projects/{project_id}")
+async def update_project(project_id: int, request: ProjectUpdateRequest, db: Session = Depends(get_db)):
+    """[프로젝트명 수정 API] 피그마 AI Script Edit Page ⑬ "사용자가 직접 입력하여 수정".
+
+    지금까지는 업로드한 파일명으로 이름이 정해지고 그 뒤로 바꿀 방법이 없었다. 이 이름이
+    docx 다운로드 파일명으로도 쓰이므로(㉒ "13의 제목명.docx로 저장") 수정이 가능해야 한다.
+    """
+    project = db.get(models.Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다.")
+
+    name = request.name.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="프로젝트명이 비어 있습니다.")
+
+    project.name = name
+    db.commit()
+    db.refresh(project)
+    return {"success": True, "project_id": project.id, "data": {"name": project.name}}
+
+
+def _docx_response(content: bytes, filename: str) -> Response:
+    """다운로드 응답. 파일명이 한글이라 latin-1 헤더에 그대로 못 넣는다 — 퍼센트 인코딩한다."""
+    return Response(
+        content=content,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
+    )
+
+
+def _project_slides_for_docx(project: "models.Project"):
+    """(슬라이드 번호, 대본) 목록. 대본이 없는 장은 뺀다."""
+    return [
+        (slide.slide_number, slide.script)
+        for slide in sorted(project.slides, key=lambda s: s.slide_number)
+        if (slide.script or "").strip()
+    ]
+
+
+@api.get("/api/projects/{project_id}/script.docx")
+async def download_script_docx(project_id: int, db: Session = Depends(get_db)):
+    """[대본 다운로드] 피그마 AI Script Edit Page ㉒ "13의 제목명.docx로 저장"."""
+    project = db.get(models.Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다.")
+
+    slides = _project_slides_for_docx(project)
+    if not slides:
+        raise HTTPException(status_code=422, detail="아직 생성된 대본이 없습니다.")
+
+    content = await run_in_threadpool(docx_builder.build_script_docx, project.name, slides)
+    return _docx_response(content, f"{project.name}.docx")
+
+
+@api.get("/api/projects/{project_id}/highlight.docx")
+async def download_highlighted_script_docx(project_id: int, db: Session = Depends(get_db)):
+    """[하이라이팅 대본 다운로드] 피그마 Coach View Page ㉙ "하이라이팅_대본.docx로 저장".
+
+    발음 주의 단어에 카테고리 색을 칠한다(장단음 F7358E / 연음 0072F2 / 표기-발음불일치 F79322 —
+    피그마 ㉜에 적힌 값 그대로). 색만 칠하면 무슨 뜻인지 알 수 없으므로 범례도 함께 넣는다.
+    """
+    project = db.get(models.Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다.")
+
+    slides = _project_slides_for_docx(project)
+    if not slides:
+        raise HTTPException(status_code=422, detail="아직 생성된 대본이 없습니다.")
+
+    words = [
+        {"word": w.word, "phoneme": w.phoneme, "category": w.category, "description": w.description}
+        for w in project.difficult_words
+    ]
+    content = await run_in_threadpool(
+        docx_builder.build_highlighted_script_docx, project.name, slides, words
+    )
+    return _docx_response(content, f"하이라이팅_{project.name}.docx")
+
+
+def _evaluation_grades(evaluation) -> dict:
+    """저장된 평가 행 → 등급 dict(피그마 Feedback Page ㊶).
+
+    이력 조회 응답은 스키마가 flat이라(accuracy_score …) 키 이름이 평가 직후 응답과 다르다.
+    등급 기준은 한 곳(utils/score_grade.py)에만 두려고 여기서 이름만 맞춰 넘긴다.
+    """
+    return score_grade.grades_for({
+        "accuracy": evaluation.accuracy_score,
+        "fluency": evaluation.fluency_score,
+        "completeness": evaluation.completeness_score,
+        "pronunciation_score": evaluation.pronunciation_score,
+    })
+
 
 def _slides_payload(project: "models.Project") -> list:
     """편집 API들이 공통으로 돌려주는 슬라이드 목록(번호 순)."""

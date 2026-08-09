@@ -50,6 +50,9 @@ _EXPECTED_COLUMNS = {
     "difficult_words": {
         "description": "TEXT",
     },
+    "script_jobs": {
+        "step": "INTEGER",
+    },
 }
 
 

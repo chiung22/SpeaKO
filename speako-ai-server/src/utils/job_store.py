@@ -27,6 +27,19 @@ session_factory = SessionLocal
 # 완료된 작업 기록을 무한정 쌓아두지 않는다. 프론트가 결과를 받아가면 더 볼 일이 없다.
 _MAX_JOBS = 1000
 
+# 피그마 AI Set Page (Loading)은 진행을 **4단계**로 그린다:
+#   ① 파일 수령 → ② 텍스트 추출 → ③ 대본 작성 중 → ④ 완료
+# ①②는 `POST /api/projects`(업로드·추출)에서 이미 끝난 뒤에 이 화면이 뜬다 — 피그마에서도
+# 그 둘은 채워진 상태로, ③만 스피너가 돈다. 그래서 작업은 ③에서 시작한다.
+STEP_LABELS = {1: "파일 수령", 2: "텍스트 추출", 3: "대본 작성", 4: "완료"}
+TOTAL_STEPS = 4
+INITIAL_STEP = 3
+DONE_STEP = 4
+
+
+def step_label(step) -> str:
+    return STEP_LABELS.get(step, "")
+
 
 def _prune(db) -> None:
     """상한을 넘으면 가장 오래된 작업부터 지운다."""
@@ -51,7 +64,7 @@ def create_job() -> str:
     job_id = uuid.uuid4().hex
     db = session_factory()
     try:
-        db.add(models.ScriptJob(id=job_id, status="processing"))
+        db.add(models.ScriptJob(id=job_id, status="processing", step=INITIAL_STEP))
         _prune(db)
         db.commit()
     finally:
@@ -74,7 +87,7 @@ def _finish(job_id: str, **fields) -> None:
 
 def complete_job(job_id: str, data) -> None:
     """작업을 '완료'로 표시하고 결과(data)를 저장한다."""
-    _finish(job_id, status="completed", data=data, error=None)
+    _finish(job_id, status="completed", data=data, error=None, step=DONE_STEP)
 
 
 def fail_job(job_id: str, error: str) -> None:
@@ -89,7 +102,12 @@ def get_job(job_id: str):
         job = db.get(models.ScriptJob, job_id)
         if job is None:
             return None
-        return {"status": job.status, "data": job.data, "error": job.error}
+        # step이 None인 건 이 컬럼이 생기기 전에 만들어진 작업이다(마이그레이션 직후).
+        # 화면이 "0단계"를 그리지 않도록 시작 단계로 채워준다.
+        return {
+            "status": job.status, "data": job.data, "error": job.error,
+            "step": job.step or INITIAL_STEP,
+        }
     finally:
         db.close()
 
