@@ -7,12 +7,12 @@
 
 # style 키 → 그 어투를 구체적으로 지시하는 문장.
 STYLE_INSTRUCTIONS = {
-    "격식체": (
+    "formal": (
         "공식적이고 전문적인 격식체(하십시오체)로 작성하세요. "
         "모든 문장을 '~습니다' '~합니다' '~입니다' '~드리겠습니다'로 끝맺으세요. "
         "'~이고요' '~해요' '~예요' '~답니다' '~죠' '~할게요' '~보았고요' 같은 해요체·구어체 어미는 절대 쓰지 마세요."
     ),
-    "편안한 말투": (
+    "casual": (
         "청중과 편하게 대화하듯 말하는 친근한 대화체(해요체)로 작성하세요. "
         "문장을 주로 '~해요' '~예요' '~네요' '~거예요' '~드릴게요'처럼 부드럽게 끝맺으세요. "
         # 격식체와 달리 어미 폭이 넓은 게 자연스러우므로 금지는 가볍게 둔다.
@@ -43,9 +43,24 @@ LAST_SLIDE_INSTRUCTION = (
 )
 
 
+# 구버전 값 → 새 키. 스프링 연동(2026-08-12)부터 공식 값은 "formal"/"casual"이지만,
+# 기존 문서·테스트·배포된 프론트가 한국어 값을 보내던 시기가 있어 계속 받아준다.
+# (여기서 안 받아주면 한국어 값이 조용히 폴백으로 빠져 casual 요청이 formal로 생성된다)
+STYLE_ALIASES = {
+    "격식체": "formal",
+    "편안한 말투": "casual",
+}
+
+
+def normalize_style(style):
+    """어느 표기로 오든 정식 키("formal"/"casual")로 통일한다. 모르는 값은 formal."""
+    key = STYLE_ALIASES.get(style, style)
+    return key if key in STYLE_INSTRUCTIONS else "formal"
+
+
 def style_instruction(style):
-    """알 수 없는 style이 와도 격식체로 안전하게 폴백한다."""
-    return STYLE_INSTRUCTIONS.get(style, STYLE_INSTRUCTIONS["격식체"])
+    """알 수 없는 style이 와도 formal(격식체)로 안전하게 폴백한다."""
+    return STYLE_INSTRUCTIONS[normalize_style(style)]
 
 
 def audience_instruction(audience):

@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 from utils.usage_tracker import log_hcx_call
 from clova.hcx_request import post_with_retry
 from clova.toon_parser import clean_script_text
-from clova.styles import STYLE_INSTRUCTIONS, audience_instruction  # noqa: F401 (STYLE_INSTRUCTIONS: 기존 임포트 경로 호환)
+from clova.styles import audience_instruction, style_instruction
 
 load_dotenv()
 
@@ -48,7 +48,9 @@ class PartialScriptGenerator:
         덧붙이지 마세요.
         """
 
-        requirement_text = STYLE_INSTRUCTIONS[style]
+        # 직접 인덱싱 금지 — 한국어 별칭(격식체 등)이 오면 KeyError가 난다.
+        # style_instruction()이 별칭 매핑과 formal 폴백까지 처리한다 (clova/styles.py).
+        requirement_text = style_instruction(style)
         requirement_text += f"\n대상(청중): {audience_instruction(audience)}"
         if extra_requirement and extra_requirement.strip():
             requirement_text += f"\n추가 요구사항: {extra_requirement.strip()}"
