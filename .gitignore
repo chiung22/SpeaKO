@@ -13,6 +13,9 @@ __pycache__/
 .env
 .env.*
 !.env.example
+# SSH/EC2 개인키 — 어떤 경로에 두더라도 절대 커밋 금지 (2026-08-12 docs/에 .pem이 놓였던 적 있음)
+*.pem
+*.ppk
 # 키 발급 메모/가이드류 — 실수로 실제 키를 붙여넣어도 커밋되지 않도록 파일명 패턴 자체를 차단
 apikey*
 apikey_발급.txt
