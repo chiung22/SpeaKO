@@ -68,33 +68,17 @@ curl -s localhost:8000/            # 서버 소개 JSON이 나와야 함
 docker logs speako-ai | tail -20   # "SPEAKO_API_KEY가 비어 있습니다" 경고가 없어야 함
 ```
 
-## 6. 스프링 쪽 수정 2가지
+## 6. 스프링 쪽 수정 — 환경변수 2개만 설정
 
-### (1) AI 서버 주소 → localhost (환경변수)
+**EC2 대응 코드는 2026-08-12에 이미 전달·적용 완료** (`PresentationService`·`EvaluationService` 최종본):
 
-```java
-// 트라이클라우드페어 주소 대신:
-private static final String AI_BASE_URL =
-        System.getenv().getOrDefault("AI_BASE_URL", "http://localhost:8000");
-```
+- `AI_BASE_URL = System.getenv().getOrDefault("AI_BASE_URL", "<터널 주소>")` — 환경변수가
+  없으면 터널(로컬 테스트), 있으면 그 값 사용
+- 모든 AI 호출 헤더에 `X-API-Key` 자동 추가 (`SPEAKO_API_KEY` 환경변수가 있을 때만 —
+  로컬에선 키가 꺼져 있어 헤더 없이도 통과, EC2에선 켜지므로 필수)
+- 폴링 GET은 `getForEntity` → `exchange`로 전환돼 헤더가 실린다
 
-### (2) 모든 AI 서버 호출에 `X-API-Key` 헤더 (없으면 전부 401)
-
-로컬 테스트에선 키가 꺼져 있어 통과됐지만 EC2에선 켜진다. `PresentationService`·`EvaluationService`
-등 **AI 서버를 부르는 모든 곳**의 헤더에 추가:
-
-```java
-headers.set("X-API-Key", System.getenv("SPEAKO_API_KEY"));
-```
-
-⚠️ **폴링 GET도 예외가 아니다.** `getForEntity`는 헤더를 못 실으므로 `exchange`로 바꿔야 한다:
-
-```java
-HttpEntity<Void> authEntity = new HttpEntity<>(headers);   // X-API-Key 포함된 headers
-ResponseEntity<Map> statusResponse = restTemplate.exchange(
-        AI_BASE_URL + "/api/script/jobs/" + jobId,
-        HttpMethod.GET, authEntity, Map.class);
-```
+따라서 EC2에서는 스프링 실행 전에 **환경변수 2개만** 설정하면 된다:
 
 스프링 실행 환경변수 예 (systemd면 Environment=, 직접 실행이면 export):
 
