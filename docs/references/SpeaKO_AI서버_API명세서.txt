@@ -127,7 +127,8 @@
     {
       "project_id": 12,               // 필수
       "presentation_time": 8,         // 필수, 분 단위
-      "style": "격식체",               // 필수, "격식체" | "편안한 말투"  (다른 값은 422)
+      "style": "formal",              // 필수, "formal"(격식체) | "casual"(편안한 말투)
+                                       //   구버전 한국어 값("격식체"/"편안한 말투")도 허용. 그 외는 422
       "topic": "발표 주제",            // 선택, 비우면 프로젝트에 저장된 주제 사용
       "audience": "교수님",            // 선택, 예) 교수님 / 면접관 / 초등학생
       "extra_requirement": ""         // 선택, 추가 가이드라인 자유 입력
@@ -302,7 +303,7 @@
     {
       "project_id": 12,
       "target_slide": 3,              // 다시 만들 슬라이드 번호
-      "style": "격식체",               // 필수, "격식체" | "편안한 말투"
+      "style": "formal",              // 필수, "formal" | "casual" (한국어 값도 허용)
       "audience": "면접관",            // 선택
       "extra_requirement": "더 짧게"   // 선택
     }

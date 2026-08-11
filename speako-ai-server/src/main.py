@@ -6,7 +6,9 @@ if sys.stdout.encoding.lower() != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
 
-from fastapi import FastAPI, APIRouter, UploadFile, File, Form, Header, HTTPException, Depends, status
+from fastapi import FastAPI, APIRouter, Request, UploadFile, File, Form, Header, HTTPException, Depends, status
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from starlette.concurrency import run_in_threadpool
@@ -69,6 +71,26 @@ app = FastAPI(
     description="SpeaKO 프로젝트의 대본 생성 및 발음 분석을 담당하는 AI 마이크로서비스입니다.",
     version="1.0.0"
 )
+
+
+@app.exception_handler(RequestValidationError)
+async def _log_validation_errors(request: Request, exc: RequestValidationError):
+    """422를 서버 콘솔에도 남긴다 (응답은 FastAPI 기본 그대로).
+
+    왜: 연동 테스트에서 스프링이 422를 받고도 응답 본문을 안 읽고 재시도만 반복하면,
+    우리 쪽에선 "422가 났다"는 사실만 보이고 **무엇이 틀렸는지**는 안 보인다(FastAPI는
+    검증 실패를 콘솔에 안 찍는다). 실측(2026-08-12): 같은 422가 3연발로 오는데 원인을
+    상대방 화면 캡처 없이는 알 수 없었다. 서버 로그만 보고 원인을 짚을 수 있게 남긴다.
+    """
+    errors = [
+        {"field": ".".join(str(part) for part in e.get("loc", [])), "msg": e.get("msg")}
+        for e in exc.errors()
+    ]
+    body_preview = str(exc.body)[:300] if exc.body is not None else "(없음)"
+    print(f"⚠️ 422 검증 실패: {request.method} {request.url.path}")
+    print(f"   틀린 필드: {errors}")
+    print(f"   받은 본문: {body_preview}")
+    return await request_validation_exception_handler(request, exc)
 
 # 3. CORS(교차 출처 리소스 공유) 설정
 # 배포된 프론트엔드(Vercel)에서 브라우저가 직접 이 API를 부르면, 허용 목록에 없는 출처는
@@ -284,10 +306,15 @@ def _compiled_script_text(project: "models.Project", only_scripted: bool = True)
 # ==========================================
 # 📦 프론트엔드와 통신할 데이터 모델 (JSON 바디 정의)
 # ==========================================
+# 어투 허용값. 공식은 "formal"/"casual"(스프링 연동 합의, 2026-08-12).
+# 한국어 값은 기존 문서·프론트 호환용 — clova/styles.py의 STYLE_ALIASES가 매핑한다.
+StyleValue = Literal["formal", "casual", "격식체", "편안한 말투"]
+
+
 class FullScriptRequest(BaseModel):
     project_id: int = Field(..., ge=1)
     presentation_time: int = Field(..., ge=1, le=MAX_PRESENTATION_MINUTES)
-    style: Literal["격식체", "편안한 말투"]
+    style: StyleValue
     extra_requirement: Optional[str] = Field("", max_length=MAX_EXTRA_REQUIREMENT_LEN)
     audience: Optional[str] = Field("", max_length=MAX_AUDIENCE_LEN)  # 발표 대상/청중 (피그마 '대상' 필드, 예: 교수님/면접관). 선택 입력.
     topic: Optional[str] = Field("", max_length=MAX_TOPIC_LEN)  # 발표 주제. 비우면 프로젝트에 저장된 주제(생성 시 입력)를 사용한다.
@@ -295,7 +322,7 @@ class FullScriptRequest(BaseModel):
 class PartialScriptRequest(BaseModel):
     project_id: int = Field(..., ge=1)
     target_slide: int = Field(..., ge=1)
-    style: Literal["격식체", "편안한 말투"]
+    style: StyleValue
     extra_requirement: Optional[str] = Field("", max_length=MAX_EXTRA_REQUIREMENT_LEN)
     audience: Optional[str] = Field("", max_length=MAX_AUDIENCE_LEN)  # 발표 대상/청중. 선택 입력.
 
@@ -616,7 +643,13 @@ async def create_full_script(request: FullScriptRequest, db: Session = Depends(g
     GET /api/script/jobs/{job_id}로 상태를 물어본다(완료되면 결과 포함)."""
     project = db.get(models.Project, request.project_id)
     if not project:
-        raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다.")
+        # 연동 테스트 진단용: 상대가 404 응답 본문을 안 읽고 재시도만 반복할 때,
+        # **무슨 ID를 보냈는지** 우리 로그만 보고 알 수 있어야 한다 (2026-08-12 실측 상황).
+        print(f"⚠️ 404 대본 생성: project_id={request.project_id} 는 이 서버에 없습니다 "
+              f"(POST /api/projects 응답의 project_id를 써야 함)")
+        raise HTTPException(status_code=404, detail=(
+            f"project_id={request.project_id} 프로젝트를 찾을 수 없습니다. "
+            "POST /api/projects(자료 업로드) 응답으로 받은 project_id를 사용하세요."))
     if not project.slides:
         raise HTTPException(status_code=422, detail="이 프로젝트에 추출된 슬라이드가 없습니다.")
 
@@ -667,8 +700,9 @@ async def get_script_job(job_id: str):
 
 @api.post("/api/script/partial")
 async def create_partial_script(request: PartialScriptRequest, db: Session = Depends(get_db)):
-    """[대본 부분 재생성 API] project_id + target_slide로 대상을 지정하고, style은 "격식체"/"편안한 말투" 중 하나,
-    extra_requirement는 선택 입력(공백 가능). 기존 대본 전문을 다시 보낼 필요 없이 DB에 저장된 걸 그대로 쓴다."""
+    """[대본 부분 재생성 API] project_id + target_slide로 대상을 지정하고, style은 "formal"/"casual" 중 하나
+    (구버전 "격식체"/"편안한 말투"도 허용), extra_requirement는 선택 입력(공백 가능).
+    기존 대본 전문을 다시 보낼 필요 없이 DB에 저장된 걸 그대로 쓴다."""
     project = db.get(models.Project, request.project_id)
     if not project:
         raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다.")

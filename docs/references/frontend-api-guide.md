@@ -170,10 +170,10 @@ DELETE /api/projects/{id}     기록 삭제
 
 **요청** (`application/json`)
 ```json
-{ "project_id": 12, "presentation_time": 8, "style": "격식체",
+{ "project_id": 12, "presentation_time": 8, "style": "formal",
   "topic": "발표 주제", "audience": "교수님", "extra_requirement": "" }
 ```
-- `style`: `"격식체"` 또는 `"편안한 말투"` (필수, 다른 값은 422)
+- `style`: `"formal"`(격식체) 또는 `"casual"`(편안한 말투) — 필수. 구버전 한국어 값(`"격식체"`/`"편안한 말투"`)도 계속 받습니다. 그 외 값은 422
 - `topic`/`audience`/`extra_requirement`: 선택. `topic`을 비우면 프로젝트에 저장된 주제를 씁니다.
 
 **응답 `202`** — 기다리지 않고 바로 옵니다.
@@ -245,7 +245,7 @@ DELETE /api/projects/{id}     기록 삭제
 
 ### 슬라이드 부분 재생성 — `POST /api/script/partial`
 ```json
-{ "project_id": 12, "target_slide": 3, "style": "격식체",
+{ "project_id": 12, "target_slide": 3, "style": "formal",
   "audience": "면접관", "extra_requirement": "더 짧게" }
 ```
 기존 대본을 다시 보낼 필요 없이 서버에 저장된 것을 씁니다. (동기 호출, 몇 초)
