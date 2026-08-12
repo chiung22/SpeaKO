@@ -22,7 +22,7 @@ from fastapi.testclient import TestClient
 import main
 from main import app, MAX_TTS_TEXT_LEN
 from db import models
-from tts import tts_cache
+from tts import tts_cache, voices
 from utils import usage_tracker
 
 client = TestClient(app)
@@ -35,8 +35,21 @@ def synth_spy(monkeypatch):
     """실제 합성 호출을 가로채, 무엇을 몇 번 합성했는지 기록한다."""
     calls = []
 
-    def _fake_synthesize(text, speaker="ndain"):
+    def _fake_synthesize(text, speaker="ndain", speed=0):
         calls.append(text)
+        return FAKE_MP3
+
+    monkeypatch.setattr(main.tts_client, "synthesize_bytes", _fake_synthesize)
+    return calls
+
+
+@pytest.fixture
+def synth_spy_full(monkeypatch):
+    """텍스트만이 아니라 화자·속도까지 기록하는 스파이 — 목소리/속도 설정 테스트용."""
+    calls = []
+
+    def _fake_synthesize(text, speaker="ndain", speed=0):
+        calls.append({"text": text, "speaker": speaker, "speed": speed})
         return FAKE_MP3
 
     monkeypatch.setattr(main.tts_client, "synthesize_bytes", _fake_synthesize)
@@ -166,11 +179,102 @@ def test_cache_survives_empty_file(monkeypatch):
     assert tts_cache.get("각짜", "ndain") is None
 
 
+# ---------------------------------------------------------------- 목소리·속도 설정 (2026-08-12 제품 확정)
+
+def test_each_voice_maps_to_its_clova_speaker(synth_spy_full, db_session_factory):
+    """이름("동현")이 정확한 Clova 코드("ndonghyun")로 합성돼야 한다.
+
+    코드가 틀리면 Clova가 합성을 거부해 502로만 보이므로, 매핑을 여기서 못박는다.
+    (코드값은 2026-08-12 NCP tts-premium 문서 대조 확인)
+    """
+    expected = {
+        "동현": "ndonghyun",
+        "대성": "ndaeseong",
+        "혜리": "nes_c_hyeri",
+        "고은": "ngoeun",
+    }
+    project_id = _project_with_word(db_session_factory)
+
+    for voice in expected:
+        client.post("/api/tts/word", json={"project_id": project_id, "word": "각자", "voice": voice})
+
+    assert [c["speaker"] for c in synth_spy_full] == list(expected.values())
+
+
+def test_speed_is_passed_through(synth_spy_full, db_session_factory):
+    project_id = _project_with_word(db_session_factory)
+
+    response = client.post(
+        "/api/tts/word",
+        json={"project_id": project_id, "word": "각자", "voice": "고은", "speed": -3},
+    )
+
+    assert response.status_code == 200
+    assert synth_spy_full == [{"text": "각짜", "speaker": "ngoeun", "speed": -3}]
+
+
+def test_omitting_voice_keeps_default_speaker(synth_spy_full, db_session_factory):
+    """설정 UI가 없는 기존(배포된) 프론트가 이 API를 그대로 써도 동작이 바뀌면 안 된다."""
+    project_id = _project_with_word(db_session_factory)
+
+    client.post("/api/tts/word", json={"project_id": project_id, "word": "각자"})
+
+    assert synth_spy_full == [{"text": "각짜", "speaker": main.TTS_SPEAKER, "speed": 0}]
+
+
+def test_unknown_voice_rejected(db_session_factory):
+    """카탈로그 밖 화자는 422 — 자유 입력을 열어두면 오타·임의 코드가 그대로 과금 호출로 나간다."""
+    response = client.post("/api/tts/word", json={"word": "각자", "voice": "철수"})
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize("speed", [-6, 6])
+def test_speed_out_of_range_rejected(speed):
+    """제품 범위는 -5~+5. Clova 자체는 10까지 받지만 제품이 정한 범위 밖은 막는다."""
+    response = client.post("/api/tts/word", json={"word": "각자", "speed": speed})
+    assert response.status_code == 422
+
+
+def test_voice_literal_matches_catalog():
+    """요청 모델의 Literal과 카탈로그(VOICES)가 어긋나면, 목록 API에는 나오는데
+    정작 합성 요청은 422가 나는(또는 그 반대) 반쪽 화자가 생긴다."""
+    from typing import get_args
+    literal = main.TtsWordRequest.model_fields["voice"].annotation
+    allowed = set(get_args(get_args(literal)[0]))  # Optional[Literal[...]] → Literal 값들
+    assert allowed == set(voices.VOICES.keys())
+
+
+def test_cache_separates_voice_and_speed(synth_spy_full, db_session_factory):
+    """같은 단어라도 목소리·속도가 다르면 다른 소리다 — 캐시가 섞이면
+    '고은 -5'를 고른 사용자가 '동현 +5' 오디오를 듣는다."""
+    project_id = _project_with_word(db_session_factory)
+    base = {"project_id": project_id, "word": "각자"}
+
+    client.post("/api/tts/word", json={**base, "voice": "동현"})
+    client.post("/api/tts/word", json={**base, "voice": "고은"})            # 화자 다름 → 재합성
+    client.post("/api/tts/word", json={**base, "voice": "고은", "speed": 3})  # 속도 다름 → 재합성
+    repeat = client.post("/api/tts/word", json={**base, "voice": "고은", "speed": 3})  # 완전 동일 → 캐시
+
+    assert len(synth_spy_full) == 3
+    assert repeat.headers["X-TTS-Cache"] == "hit"
+
+
+def test_voices_endpoint_lists_catalog():
+    """프론트 설정 화면이 그릴 목록. 이름·성별과 속도 범위가 그대로 내려가야 한다."""
+    response = client.get("/api/tts/voices")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert {v["name"] for v in body["voices"]} == {"동현", "대성", "혜리", "고은"}
+    assert {v["gender"] for v in body["voices"]} == {"남성", "여성"}
+    assert body["speed"] == {"min": -5, "max": 5, "default": 0}
+
+
 # ---------------------------------------------------------------- 실패·상한
 
 def test_synthesis_failure_returns_502(monkeypatch, db_session_factory):
     project_id = _project_with_word(db_session_factory)
-    monkeypatch.setattr(main.tts_client, "synthesize_bytes", lambda text, speaker="ndain": None)
+    monkeypatch.setattr(main.tts_client, "synthesize_bytes", lambda text, speaker="ndain", speed=0: None)
 
     response = client.post("/api/tts/word", json={"project_id": project_id, "word": "각자"})
 
@@ -180,7 +284,7 @@ def test_synthesis_failure_returns_502(monkeypatch, db_session_factory):
 def test_failed_synthesis_is_not_cached(monkeypatch, db_session_factory):
     """실패를 캐시하면 그 단어는 영원히 안 들린다."""
     project_id = _project_with_word(db_session_factory)
-    monkeypatch.setattr(main.tts_client, "synthesize_bytes", lambda text, speaker="ndain": None)
+    monkeypatch.setattr(main.tts_client, "synthesize_bytes", lambda text, speaker="ndain", speed=0: None)
     client.post("/api/tts/word", json={"project_id": project_id, "word": "각자"})
 
     assert tts_cache.get("각짜", main.TTS_SPEAKER) is None

@@ -29,15 +29,20 @@ MAX_ENTRIES = 2000
 _lock = threading.Lock()
 
 
-def _cache_path(text: str, speaker: str) -> str:
-    """같은 글자라도 화자가 다르면 다른 소리이므로 화자를 키에 포함한다."""
-    digest = hashlib.sha256(f"{speaker}\x00{text}".encode("utf-8")).hexdigest()
+def _cache_path(text: str, speaker: str, speed: int = 0) -> str:
+    """같은 글자라도 화자·속도가 다르면 다른 소리이므로 둘 다 키에 포함한다.
+
+    speed가 키에 없으면 -5로 들은 사용자가 +5 오디오를 받는(또는 그 반대) 스테일 적중이 난다.
+    키 형식이 바뀌며 기존 캐시는 자연히 미스가 되는데, 단어당 한 번 재합성되고 마는 비용이라
+    감수한다(배포 서버는 어차피 빈 캐시에서 시작).
+    """
+    digest = hashlib.sha256(f"{speaker}\x00{speed}\x00{text}".encode("utf-8")).hexdigest()
     return os.path.join(CACHE_DIR, f"{digest}.mp3")
 
 
-def get(text: str, speaker: str) -> bytes:
+def get(text: str, speaker: str, speed: int = 0) -> bytes:
     """캐시된 오디오를 돌려준다. 없으면 None."""
-    path = _cache_path(text, speaker)
+    path = _cache_path(text, speaker, speed)
     try:
         with open(path, "rb") as f:
             audio = f.read()
@@ -55,12 +60,12 @@ def get(text: str, speaker: str) -> bytes:
     return audio
 
 
-def put(text: str, speaker: str, audio: bytes) -> None:
+def put(text: str, speaker: str, audio: bytes, speed: int = 0) -> None:
     """오디오를 캐시에 저장한다. 저장에 실패해도 호출부는 계속 진행해야 한다(캐시는 부가 기능)."""
     if not audio:
         return
 
-    path = _cache_path(text, speaker)
+    path = _cache_path(text, speaker, speed)
     try:
         os.makedirs(CACHE_DIR, exist_ok=True)
         # 임시 파일에 다 쓴 뒤 교체한다. 그냥 쓰면 쓰는 도중에 다른 요청이 읽어서

@@ -36,11 +36,14 @@ class ClovaVoiceClient:
             print("⚠️ [경고] Clova Voice API 키가 설정되지 않았습니다.")
             print("⚠️ 서버 구동 및 테스트를 위해 안전 모드(Mock)로 작동합니다.\n")
 
-    def synthesize_bytes(self, text: str, speaker: str = "ndain") -> bytes:
+    def synthesize_bytes(self, text: str, speaker: str = "ndain", speed: int = 0) -> bytes:
         """텍스트를 합성해 MP3 **바이트**를 돌려준다. 실패하면 None.
 
         API 응답으로 온 오디오를 굳이 파일로 떨어뜨렸다가 다시 읽을 이유가 없어서, HTTP
         핸들러가 쓰는 정식 경로는 이쪽이다. `synthesize_word`는 이 위에 파일 저장을 얹은 것이다.
+
+        speed: Clova 기준 -5(2배 빠름)~10(0.5배 느림), 0=보통. 제품이 여는 범위(-5~+5)의
+        검증은 요청 모델이 하고, 여기는 받은 값을 그대로 전달만 한다.
 
         ⚠️ requests는 완전 블로킹이다. `async def` 핸들러에서 직접 부르지 말고
         `run_in_threadpool`로 감쌀 것 (tests/test_blocking_offload.py가 이 계약을 지킨다).
@@ -59,7 +62,7 @@ class ClovaVoiceClient:
         data = {
             "speaker": speaker,
             "volume": "0",
-            "speed": "0",
+            "speed": str(speed),
             "pitch": "0",
             "format": "mp3",
             "text": text

@@ -160,7 +160,7 @@ def test_tts_synthesis_runs_off_the_event_loop(monkeypatch, db_session_factory):
     record = {}
     note = _where_did_it_run(record, "tts")
 
-    def _fake_synthesize(text, speaker="ndain"):
+    def _fake_synthesize(text, speaker="ndain", speed=0):
         note()
         return b"fake mp3 bytes"
 
