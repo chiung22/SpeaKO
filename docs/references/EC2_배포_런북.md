@@ -35,12 +35,14 @@ cd SpeaKO/speako-ai-server
 scp -i 키.pem c:/Users/송치웅/Desktop/Project/SpeaKO/speako-ai-server/.env ubuntu@${새IP}:~/SpeaKO/speako-ai-server/.env
 ```
 
-**(EC2에서)** `SPEAKO_API_KEY`를 이 자리에서 생성해 덧붙인다 (값이 머신 밖으로 안 나감):
+**(EC2에서)** `SPEAKO_API_KEY`를 이 자리에서 생성해 채운다 (값이 머신 밖으로 안 나감).
+복사해 온 `.env`에 플레이스홀더 줄이 이미 있으므로 **덧붙이지 말고 교체**한다
+(덧붙이면 키가 두 줄이 되고, 어느 쪽이 이길지 도구마다 달라 디버깅 지옥이 된다):
 
 ```bash
 cd ~/SpeaKO/speako-ai-server
-echo "SPEAKO_API_KEY=$(openssl rand -hex 32)" >> .env
-grep -c SPEAKO_API_KEY .env   # 1이어야 함 (2 이상이면 중복 — 파일 열어 정리)
+sed -i "s|^SPEAKO_API_KEY=.*|SPEAKO_API_KEY=$(openssl rand -hex 32)|" .env
+grep -c '^SPEAKO_API_KEY=' .env   # 1이어야 함
 ```
 
 스프링도 같은 값이 필요하다. **같은 머신이므로** 스프링 담당자가 EC2 안에서 직접 읽어 가면 된다:
@@ -93,6 +95,30 @@ java -Xmx1g -jar app.jar   # 4GB 공유 머신이므로 JVM 상한 1GB 권장
 1. 스프링 경유 대본 생성 1회 (202 → 폴링 → completed → DB 저장)
 2. 스프링 경유 발음 평가 1회 — **이번엔 긴 녹음(1분 50초짜리)도 가능** (터널 120초 상한이 사라짐)
 3. `docker logs speako-ai`에서 401/422/500 없는지 확인
+
+## 7-1. 실제 프론트 연동 전 스프링 체크리스트 (2026-08-12 기준 미완)
+
+로컬 테스트는 지름길(테스트 프로젝트 15번 고정)로 통과한 것이라, **실제 사용자 흐름은
+아래를 끝내야 돌아간다.** EC2의 AI 서버는 빈 DB로 시작하므로 15번 프로젝트도 없다.
+
+- [ ] **① 실제 업로드 흐름 연결 (최우선)** — `project_id=15L` 하드코딩 제거.
+      사용자 파일로 `POST /api/projects`(multipart) → 응답의 `project_id`를 Presentation에
+      저장(`aiProjectId` 컬럼 추가) → 그 값으로 `/api/script/full`·`/api/evaluation/audio` 호출.
+      **안 하면 모든 사용자가 같은 대본을 받고, EC2에선 아예 404가 난다.**
+      슬라이드 수는 응답 `data.slides` 배열 길이로 채운다.
+- [ ] **`guideline` → `extra_requirement`** — AI 서버 필드명은 `extra_requirement`다.
+      지금 보내는 `guideline` 키는 조용히 무시되고 있어서, 사용자가 적은 추가 요구사항이
+      대본에 반영되지 않는다.
+- [ ] **`audience`(발표 대상) 전달** — 피그마 '대상' 필드. 프론트가 보내면 그대로 body에 추가.
+- [ ] **파일 검증에서 `.ppt` 제거** — AI 서버는 `.pptx`/`.pdf`만 받는다. 스프링이 `.ppt`를
+      통과시키면 AI 서버 단계에서 415로 떨어진다. 프론트 안내 문구도 pptx/pdf로.
+- [ ] **스프링 CORS에 프론트 도메인 허용** — 브라우저(`speakofront.vercel.app` 등)가
+      스프링(8080)을 직접 부르므로, 스프링 쪽 CORS 설정에 프론트 도메인이 있어야 한다.
+      (AI 서버 CORS는 무관 — 스프링 경유라 브라우저가 직접 안 부름)
+- [ ] **프론트의 API 주소를 EC2 스프링 주소로** — IP 하드코딩이면 Elastic IP를 붙이거나
+      재시작 때마다 갱신 필요.
+- [ ] (권장) `generatePresentationAndScript`의 `@Transactional` 제거 — 폴링 90초 동안
+      DB 커넥션을 점유한다. 동시 사용자 몇 명이면 커넥션 풀(기본 10개)이 마른다.
 
 ## 8. 운영 명령 모음
 
