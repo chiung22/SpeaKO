@@ -56,7 +56,8 @@
 
   ● 발표 발음 코칭
      5. POST   /api/analysis/words                  발음 주의 단어 + 발음기호
-        POST   /api/tts/word                        단어 발음 듣기 -> MP3 (스피커 버튼)
+        POST   /api/tts/word                        단어 발음 듣기 -> MP3 (스피커 버튼, voice/speed 선택)
+        GET    /api/tts/voices                      발음 듣기 목소리 목록 + 속도 범위 (설정 화면용)
      6. POST   /api/evaluation/audio                녹음 업로드 -> 점수 + 인식 텍스트
      7. POST   /api/evaluation/{id}/feedback        AI 코칭 피드백
 
@@ -379,11 +380,21 @@
   Content-Type: application/json
 
   ● 요청
-    { "project_id": 12, "word": "각자" }
+    { "project_id": 12, "word": "각자", "voice": "고은", "speed": -2 }
 
     word           (필수) 화면에 보이는 철자. 최대 100자
     project_id     (선택) 있으면 저장된 발음기호를 먼저 사용 - 가장 빠름. 권장
     pronunciation  (선택) 합성할 발음을 직접 지정. "[여칼]" 처럼 대괄호가 있어도 됨
+    voice          (선택) 목소리: "동현"/"대성"(남성), "혜리"/"고은"(여성). 미지정 시 기본 화자
+    speed          (선택) 속도 -5(빠르게) ~ +5(느리게), 기본 0. 범위 밖은 422
+
+  ● 목소리 목록 API
+    GET /api/tts/voices
+    -> { "success": true,
+         "voices": [ { "name": "동현", "gender": "남성" }, { "name": "대성", "gender": "남성" },
+                     { "name": "혜리", "gender": "여성" }, { "name": "고은", "gender": "여성" } ],
+         "speed": { "min": -5, "max": 5, "default": 0 } }
+    설정 화면 선택지는 하드코딩하지 말고 이 응답을 그리면 됩니다. name 값을 그대로 voice 에 넣습니다.
 
   ● 응답
     JSON 이 아니라 MP3 바이트를 그대로 돌려줍니다.

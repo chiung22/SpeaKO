@@ -38,6 +38,7 @@ from g2p.g2p_client import G2pConverter
 from azure_speech.azure_client import PronunciationEvaluator
 from tts.clova_voice_client import ClovaVoiceClient
 from tts import tts_cache
+from tts.voices import VOICES, SPEED_MIN, SPEED_MAX, speaker_code
 from utils.ppt_extractor import PptExtractor
 from utils import pdf_extractor
 from utils import docx_extractor
@@ -343,6 +344,11 @@ class TtsWordRequest(BaseModel):
     word: str = Field(..., min_length=1, max_length=MAX_TTS_TEXT_LEN)  # 철자 (화면에 보이는 단어)
     project_id: Optional[int] = Field(None, ge=1)  # 있으면 이 프로젝트에 저장된 발음기호를 먼저 찾는다
     pronunciation: Optional[str] = Field(None, max_length=MAX_TTS_TEXT_LEN)  # 직접 지정할 발음. '[여칼]' 형태도 허용
+    # 목소리·속도 설정(2026-08-12 제품 확정: 남 동현/대성, 여 혜리/고은, 속도 -5~+5).
+    # 목록은 GET /api/tts/voices로 받는다. 미지정이면 기존 기본 화자 그대로 — 설정 UI가
+    # 아직 없는 배포 프론트가 이 API를 그대로 써도 동작이 바뀌지 않게 한다.
+    voice: Optional[Literal["동현", "대성", "혜리", "고은"]] = None
+    speed: int = Field(0, ge=SPEED_MIN, le=SPEED_MAX)  # 음수=빠르게, 양수=느리게, 0=보통
 
 class SlideUpdateRequest(BaseModel):
     """결과 화면(피그마 05)에서 사용자가 직접 고친 대본을 저장할 때 쓴다. PPT O는 슬라이드별,
@@ -846,6 +852,23 @@ def _stored_pronunciation(db: Session, project_id: int, word: str) -> str:
     return _clean_tts_text(row.phoneme) if row and row.phoneme else ""
 
 
+@api.get("/api/tts/voices")
+async def list_tts_voices():
+    """[목소리 목록 API] 발음 듣기 설정 화면이 그릴 선택지(이름·성별)와 속도 범위.
+
+    프론트가 하드코딩하는 대신 여기서 받으면, 화자 구성이 바뀌어도 프론트 수정이 없다.
+    `name` 값을 그대로 POST /api/tts/word의 `voice`로 보내면 된다.
+    """
+    return {
+        "success": True,
+        "voices": [
+            {"name": name, "gender": info["gender"]}
+            for name, info in VOICES.items()
+        ],
+        "speed": {"min": SPEED_MIN, "max": SPEED_MAX, "default": 0},
+    }
+
+
 @api.post("/api/tts/word")
 async def synthesize_word_pronunciation(request: TtsWordRequest, db: Session = Depends(get_db)):
     """[발음 듣기 API] 단어의 **표준 발음**을 합성해 MP3 바이트를 그대로 돌려준다.
@@ -876,18 +899,21 @@ async def synthesize_word_pronunciation(request: TtsWordRequest, db: Session = D
     if not text:
         text = word
 
+    # 목소리 결정: 요청에 voice가 있으면 카탈로그의 화자, 없으면 기존 기본 화자.
+    speaker = speaker_code(request.voice) if request.voice else TTS_SPEAKER
+
     # 캐시가 먼저다. Clova Voice는 글자 수만큼 과금되는데, 발음 주의 단어는 프로젝트마다 겹치고
     # 사용자가 스피커 버튼을 여러 번 누르면 똑같은 요청이 그대로 또 나간다.
-    audio = tts_cache.get(text, TTS_SPEAKER)
+    audio = tts_cache.get(text, speaker, request.speed)
     cache_status = "hit"
 
     if audio is None:
         cache_status = "miss"
         # requests.post는 완전 블로킹이다 (tests/test_blocking_offload.py가 이 계약을 지킨다).
-        audio = await run_in_threadpool(tts_client.synthesize_bytes, text, TTS_SPEAKER)
+        audio = await run_in_threadpool(tts_client.synthesize_bytes, text, speaker, request.speed)
         if audio is None:
             raise HTTPException(status_code=502, detail="발음 음성 합성에 실패했습니다.")
-        tts_cache.put(text, TTS_SPEAKER, audio)
+        tts_cache.put(text, speaker, audio, request.speed)
 
     # 헤더는 latin-1만 담을 수 있어서 한글을 그대로 넣으면 응답 자체가 깨진다. 퍼센트 인코딩한다.
     return Response(

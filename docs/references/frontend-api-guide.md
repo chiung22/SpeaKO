@@ -128,7 +128,8 @@ GET  /api/projects/{id}/highlight.docx   하이라이팅 대본 다운로드 (.d
 
 [발표 발음 코칭]
 POST /api/analysis/words      발음 주의 단어 + 발음기호 (하이라이팅용)
-POST /api/tts/word            단어 발음 듣기 → MP3 바이트 (스피커 버튼)
+POST /api/tts/word            단어 발음 듣기 → MP3 바이트 (스피커 버튼, voice/speed 선택 가능)
+GET  /api/tts/voices          발음 듣기 목소리 목록 + 속도 범위 (설정 화면용)
 POST /api/evaluation/audio    녹음 업로드 → 점수 + 인식 텍스트
 POST /api/evaluation/{id}/feedback   AI 코칭 피드백
 
@@ -284,15 +285,21 @@ body: `{ "project_id": 12 }`
 
 단어 목록의 **스피커 버튼**용입니다. JSON이 아니라 **MP3 바이트를 그대로** 돌려줍니다.
 
-body: `{ "project_id": 12, "word": "각자" }`
+body: `{ "project_id": 12, "word": "각자", "voice": "고은", "speed": -2 }`
 
 | 필드 | 필수 | 설명 |
 |---|---|---|
 | `word` | ✅ | 화면에 보이는 철자. 최대 100자 |
 | `project_id` | | 있으면 이 프로젝트에 저장된 발음기호를 먼저 씁니다(권장 — 재분석이 없어 가장 빠릅니다) |
 | `pronunciation` | | 합성할 발음을 직접 지정. `"[여칼]"`처럼 대괄호가 있어도 됩니다 |
+| `voice` | | 목소리: `"동현"`·`"대성"`(남성) / `"혜리"`·`"고은"`(여성). 미지정 시 서버 기본 화자 |
+| `speed` | | 속도 `-5`(빠르게)~`+5`(느리게), 기본 `0`. 범위 밖은 422 |
 
 응답: `Content-Type: audio/mpeg` + MP3 바이트.
+
+**목소리 목록은 `GET /api/tts/voices`로 받으세요** — `{"voices": [{"name": "동현", "gender": "남성"}, …], "speed": {"min": -5, "max": 5, "default": 0}}`.
+설정 화면의 선택지를 하드코딩하지 말고 이걸 그리면, 화자 구성이 바뀌어도 프론트 수정이 없습니다.
+`name` 값을 그대로 `voice`에 넣으면 됩니다.
 
 ```js
 const res = await fetch(`${API}/api/tts/word`, {
