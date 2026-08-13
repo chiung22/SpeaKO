@@ -81,9 +81,16 @@ def _seconds(word_entry, seconds_key, ticks_key, azure_key):
 
 
 def _prepare(words_detail):
-    """words_detail을 계산하기 쉬운 형태로 펼친다. 원본은 건드리지 않는다."""
+    """words_detail을 계산하기 쉬운 형태로 펼친다. 원본은 건드리지 않는다.
+
+    평가 모듈이 리스트가 아닌 것을 주더라도(포맷 변경·오류 응답) 여기서 막는다.
+    지표 계산이 터져서 평가 점수까지 502가 되면 안 된다.
+    """
+    if not isinstance(words_detail, (list, tuple)):
+        return []
+
     prepared = []
-    for index, entry in enumerate(words_detail or []):
+    for index, entry in enumerate(words_detail):
         if not isinstance(entry, dict):
             continue
         surface = entry.get("word")

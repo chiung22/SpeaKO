@@ -189,10 +189,21 @@ def test_speech_rate_unavailable_without_timing():
 # ------------------------------------------------------------------ 빈 입력 방어
 
 def test_empty_and_malformed_input_does_not_crash():
-    for bad in (None, [], [None], ["문자열"], [{"no_word_key": 1}]):
+    """지표 계산이 터져서 평가 점수까지 502가 되면 안 된다. 리스트가 아닌 입력도 포함."""
+    for bad in (None, [], {}, 123, 3.14, "문자열", [None], [[]], ["문자열"], [{"no_word_key": 1}]):
         result = speech_metrics.analyze(bad)
         assert result["filler_words"]["count"] == 0
         assert result["pauses"]["count"] == 0
+
+
+def test_broken_timing_does_not_disable_filler_counting():
+    """시간 값만 깨진 경우다. 단어 자체는 멀쩡하므로 간투어는 그대로 세야 한다."""
+    words = [{"word": "음", "error_type": "None", "offset_seconds": "숫자아님", "duration_seconds": None}]
+
+    result = speech_metrics.analyze(words)
+
+    assert result["filler_words"]["count"] == 1
+    assert result["pauses"]["available"] is False
 
 
 # ------------------------------------------------------------------ 엔드포인트
