@@ -4,12 +4,44 @@ API 키(ETRI/Azure/Clova Voice) 발급 대기 중 진행 가능한 작업들을 
 
 ---
 
-# 🔖 작업 재개 지점 (2026-08-12 기준)
+# 🔖 작업 재개 지점 (2026-08-14 기준)
 
 > **대화 컨텍스트가 비워진 뒤 이어서 작업할 때 여기부터 읽으세요.**
 > 바로 아래 "▶ 다음에 할 일"이 지금 지시받은 작업입니다.
 
-## ▶ 다음에 할 일 — EC2 배포 (PM 승인 대기 중)
+## ▶ 다음에 할 일 — PR #40 리뷰·머지·배포 (간투어/멈춤)
+
+**[PR #40](https://github.com/chiung22/SpeaKO/pull/40) — 발표 습관 지표(간투어·멈춤·발화 속도) 구현 완료, 배포 전.**
+회의 안건 6번("filler_word, pause, feedback detail 이게 작동을 안 함")에서 확인해보니
+**filler와 pause는 애초에 구현이 없었다.** 그 둘을 만든 것이 이 PR이다.
+
+- 응답 키: `speech_metrics` (`/api/evaluation/audio`, `/api/evaluations`, `/api/projects/{id}`)
+- 검증: 신규 23건 + 전체 374건 통과 / 구버전 DB `ALTER` 확인 / 실서버 HTTP 전 구간 확인
+- **아직 EC2에 배포 안 함.** 시연 서버가 자는 사이 깨지면 복구할 사람이 없어 의도적으로 멈춤.
+  머지 후 배포: EC2에서 `cd ~/SpeaKO && git pull && sudo docker compose up -d --build`
+  (런북: [docs/references/EC2_배포_런북.md](docs/references/EC2_배포_런북.md))
+- 배포 후 확인할 것: **실제 음성으로 멈춤이 잡히는지.** 단어 시각(`NBest[0].Words`의 Offset)이
+  연속 인식에서 오디오 시작 기준 절대값이라는 전제로 짰다. 만약 조각별 상대값이면 조각
+  경계의 멈춤만 틀리게 나온다(음수 간격은 버리므로 과소 집계 방향). 실측 한 번 필요.
+
+### 같은 회의에서 확인된 것 (별도 작업)
+
+AI 서버엔 있는데 **스프링에 중계 API가 없어서** 프론트가 못 쓰는 기능들:
+
+| 기능 | AI 서버 | 스프링 |
+|---|---|---|
+| 상세 피드백 | `POST /api/evaluation/{id}/feedback` | ❌ (안건 4번의 진짜 원인) |
+| 하이라이팅 | `POST /api/analysis/words` | ❌ (안건 5번) |
+| TTS 목소리·발음 | `/api/tts/voices`, `/api/tts/word` | ❌ (안건 7번) |
+| 대본 수정 저장 | `PUT /api/projects/{id}/slides/{n}` | ❌ |
+| 슬라이드 원문·제목 | `source_content` | ❌ `slideTitle`/`rawText`가 항상 null (안건 3번) |
+
+**새 테이블을 만들 일이 아니라 스프링에 엔드포인트를 추가할 일이다.** PPT 썸네일(안건 1번)만
+진짜 신규 개발이고, LibreOffice가 필요해 시연 전에는 값어치가 없다고 이미 판단해 둔 건이다.
+
+---
+
+## 지난 작업 — EC2 배포 (2026-08-13 완료, 아래는 당시 기록)
 
 **스프링 로컬 연동 테스트는 2026-08-12 완료.** 평가(200+실제 점수+스프링 DB 저장)와
 대본 생성(202→폴링→completed→스프링 slides/scripts 테이블 저장)까지 전 경로 검증됨.
