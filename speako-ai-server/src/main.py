@@ -48,6 +48,7 @@ from utils.stdict_client import StdictClient
 from utils.hangul_phonology import has_liaison_pattern
 from utils import phonology_rules
 from utils import score_grade
+from utils import speech_metrics
 from utils import docx_builder
 from utils.body_limit import MaxBodySizeMiddleware
 from utils.rate_limit import RateLimitMiddleware
@@ -1013,6 +1014,9 @@ async def evaluate_pronunciation(
         # 틀린 부분을 원본·인식 양쪽에서 강조하려면(피그마 Feedback Page) 단어가 각 텍스트의
         # 어디에 있는지 알아야 한다. error_type만으로는 같은 단어가 여러 번 나올 때 못 고른다.
         _attach_error_spans(result.get("words_detail"), text_to_evaluate, result.get("recognized_text"))
+        # 간투어("음…", "어…")와 멈춤은 Azure 점수에 안 드러나지만 발표 코칭에서는 제일 자주
+        # 지적되는 부분이다. 단어 목록에서 따로 계산해 결과와 함께 저장한다.
+        metrics = speech_metrics.analyze(result.get("words_detail"))
         scores = result.get("overall_scores", {})
         evaluation = models.PronunciationEvaluation(
             project_id=project.id,
@@ -1026,6 +1030,7 @@ async def evaluate_pronunciation(
             recognized_text=result.get("recognized_text"),
             # 슬라이드별로 녹음했으면 몇 번 장이었는지 남긴다(전체 녹음이면 None).
             slide_number=slide_number,
+            speech_metrics=metrics,
         )
         db.add(evaluation)
         db.commit()
@@ -1042,6 +1047,8 @@ async def evaluate_pronunciation(
             # 화면마다 기준이 달라질 수 있어서 서버가 한 곳에서 정한다(utils/score_grade.py).
             "grades": score_grade.grades_for(result.get("overall_scores")),
             **result,
+            # **result 뒤에 둬서, 평가 모듈이 같은 키를 주더라도 여기서 계산한 값이 이긴다.
+            "speech_metrics": metrics,
         }
     except HTTPException:
         raise
@@ -1142,6 +1149,7 @@ async def list_evaluations(db: Session = Depends(get_db)):
                 "pronunciation_score": e.pronunciation_score,
                 "grades": _evaluation_grades(e),  # A~F (피그마 Feedback Page)
                 "feedback": e.feedback,  # 아직 생성 안 했으면 null
+                "speech_metrics": e.speech_metrics,  # 간투어·멈춤·발화 속도
                 "reference_text": e.reference_text,   # 원본 대본
                 "recognized_text": e.recognized_text,  # Azure가 실제로 인식한 텍스트
                 "created_at": e.created_at.isoformat(),
@@ -1184,6 +1192,7 @@ async def get_project(project_id: int, db: Session = Depends(get_db)):
                     "pronunciation_score": e.pronunciation_score,
                     "grades": _evaluation_grades(e),  # A~F (피그마 Feedback Page)
                     "feedback": e.feedback,  # 아직 생성 안 했으면 null
+                    "speech_metrics": e.speech_metrics,  # 간투어·멈춤·발화 속도
                     "reference_text": e.reference_text,   # 원본 대본
                     "recognized_text": e.recognized_text,  # Azure가 실제로 인식한 텍스트
                     "words_detail": e.words_detail,        # 단어별 점수(하이라이팅용)

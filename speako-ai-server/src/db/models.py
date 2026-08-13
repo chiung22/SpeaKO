@@ -93,6 +93,9 @@ class PronunciationEvaluation(Base):
     recognized_text = Column(Text, nullable=True)
     # AI 코칭 피드백(총평/잘한 점/개선할 점/연습 팁). 평가 직후엔 비어 있고, 피드백 생성 API를 부르면 채워진다.
     feedback = Column(JSON, nullable=True)
+    # 발표 습관 지표(간투어·멈춤·발화 속도). Azure 점수만으로는 안 드러나는 군더더기 말과
+    # 끊긴 구간을 words_detail에서 따로 계산해 둔 것(utils/speech_metrics.py).
+    speech_metrics = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=_utcnow, nullable=False)
 
     project = relationship("Project", back_populates="evaluations")
