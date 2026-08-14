@@ -200,9 +200,20 @@ def test_upload_queues_thumbnails_and_reports_status(monkeypatch, db_session_fac
                         "application/vnd.openxmlformats-officedocument.presentationml.presentation")},
     )
 
-    assert response.status_code == 200
-    assert response.json()["data"]["thumbnail_status"] == "pending"
-    assert submitted["args"][0] == response.json()["project_id"]
+    try:
+        assert response.status_code == 200
+        assert response.json()["data"]["thumbnail_status"] == "pending"
+
+        project_id, source_copy = submitted["args"]
+        assert project_id == response.json()["project_id"]
+        # 백그라운드에 넘길 사본이 실제로 만들어져 있어야 한다. 원본 임시 파일은 요청이
+        # 끝나면서 지워지므로, 사본이 없으면 변환할 게 없는 채로 작업이 돈다.
+        assert os.path.exists(source_copy)
+    finally:
+        # submit을 가로챘으니 사본을 지울 백그라운드 작업도 안 돈다. 여기서 치운다.
+        for path in submitted.get("args", ())[1:]:
+            if isinstance(path, str) and os.path.exists(path):
+                os.remove(path)
 
 
 def test_upload_still_succeeds_when_tools_are_missing(monkeypatch, db_session_factory):
