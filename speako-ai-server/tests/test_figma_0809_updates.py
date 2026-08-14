@@ -2,7 +2,9 @@
 
 `docs/figma/SpeaKO_screenshot/` 22장을 실제 구현과 대조해 나온 차이들이다.
 
-1. 점수 등급 A~F — Feedback Page ㊶ "종합(정확,유창,완성) 점수(A,B,C,D,F)"
+1. 점수 표기 — 0~100 **정수**로 내려준다
+   (등급 A~F는 2026-08-15에 없앴다. 화면이 `87점/100`을 그리는데 등급 문자가 따로 필요
+    없었고, 소수점은 자릿수가 흔들려 레이아웃이 밀렸다.)
 2. 프로젝트명 수정 — AI Script Edit Page ⑬ "사용자가 직접 입력하여 수정"
 3. .docx 다운로드 — ㉒ "13의 제목명.docx로 저장", ㉙ "하이라이팅_대본.docx로 저장"
 4. 대본 생성 4단계 진행 — AI Set Page (Loading)의 4단계 표시
@@ -17,7 +19,7 @@ from fastapi.testclient import TestClient
 import main
 from main import app
 from db import models
-from utils import job_store, score_grade
+from utils import job_store
 
 client = TestClient(app)
 
@@ -38,24 +40,41 @@ def _project(db_session_factory, name="발표자료", slides=(("원문1", "첫 �
         db.close()
 
 
-# ---------------------------------------------------------------- 1. 등급 A~F
+# ---------------------------------------------------------------- 1. 정수 점수
 
-@pytest.mark.parametrize("score,expected", [
-    (100, "A"), (90, "A"), (89.9, "B"), (80, "B"), (79.9, "C"),
-    (70, "C"), (69.9, "D"), (60, "D"), (59.9, "F"), (0, "F"),
-])
-def test_grade_boundaries(score, expected):
-    """경계값이 흔들리면 같은 발표가 날마다 다른 등급을 받는다. 90/80/70/60 '이상' 기준."""
-    assert score_grade.to_grade(score) == expected
+def test_evaluation_response_returns_integer_scores(monkeypatch, db_session_factory):
+    """화면이 `87점 / 100`으로 그린다. 소수점이 붙으면 자릿수가 흔들려 레이아웃이 밀린다."""
+    project_id = _project(db_session_factory)
+    monkeypatch.setattr(main.audio_converter, "convert_to_wav",
+                        lambda i, o: (open(o, "wb").write(b"wav") or True))
+    monkeypatch.setattr(main.audio_converter, "probe_duration_seconds", lambda p: 60.0)
+    monkeypatch.setattr(main.azure_evaluator, "evaluate_audio", lambda path, text: {
+        "status": "success",
+        "overall_scores": {"accuracy": 93.2, "fluency": 85.5,
+                           "completeness": 71.4, "pronunciation_score": 64.6},
+        "recognized_text": "안녕하세요",
+        "words_detail": [{"word": "안녕하세요", "accuracy_score": 88.7, "error_type": "None"}],
+    })
+
+    response = client.post(
+        "/api/evaluation/audio",
+        data={"project_id": str(project_id)},
+        files={"audio_file": ("rec.m4a", io.BytesIO(b"fake"), "audio/mp4")},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["overall_scores"] == {
+        "accuracy": 93, "fluency": 86, "completeness": 71, "pronunciation_score": 65,
+    }
+    # 한 화면에 "종합 65"와 "안녕하세요 88.7"이 같이 뜨면 어느 쪽이 기준인지 알 수 없다.
+    assert body["words_detail"][0]["accuracy_score"] == 89
+    for value in body["overall_scores"].values():
+        assert isinstance(value, int) and not isinstance(value, bool)
 
 
-def test_grade_is_none_for_missing_score():
-    """점수가 없는데 등급을 붙이면 화면이 'null등급'을 그린다."""
-    assert score_grade.to_grade(None) is None
-    assert "accuracy" not in score_grade.grades_for({"accuracy": None, "fluency": 90})
-
-
-def test_evaluation_response_includes_grades(monkeypatch, db_session_factory):
+def test_grades_are_gone(monkeypatch, db_session_factory):
+    """등급 A~F는 없앴다(2026-08-15). 프론트가 옛 필드를 계속 읽고 있으면 여기서 걸린다."""
     project_id = _project(db_session_factory)
     monkeypatch.setattr(main.audio_converter, "convert_to_wav",
                         lambda i, o: (open(o, "wb").write(b"wav") or True))
@@ -73,31 +92,48 @@ def test_evaluation_response_includes_grades(monkeypatch, db_session_factory):
         files={"audio_file": ("rec.m4a", io.BytesIO(b"fake"), "audio/mp4")},
     )
 
-    assert response.status_code == 200
-    assert response.json()["grades"] == {
-        "accuracy": "A", "fluency": "B", "completeness": "C", "pronunciation_score": "D",
-    }
-    # 점수 자체도 계속 내려간다 — 피그마 Feedback Page는 원형 게이지에 `87점/100`을 그린다.
-    assert response.json()["overall_scores"]["pronunciation_score"] == 64.0
+    assert "grades" not in response.json()
 
 
-def test_evaluation_history_includes_grades(db_session_factory):
-    """이력에서 Feedback Page를 다시 열어도 같은 등급이 보여야 한다."""
+def test_history_rounds_scores_saved_before_the_change(db_session_factory):
+    """정수로 바꾸기 전에 저장된 행은 소수로 남아 있다. 옛 기록만 87.4로 보이면 안 된다."""
     project_id = _project(db_session_factory)
     db = db_session_factory()
     try:
         db.add(models.PronunciationEvaluation(
-            project_id=project_id, accuracy_score=95.0, fluency_score=72.0,
-            completeness_score=55.0, pronunciation_score=88.0,
+            project_id=project_id, accuracy_score=95.4, fluency_score=72.5,
+            completeness_score=55.6, pronunciation_score=88.0,
         ))
         db.commit()
     finally:
         db.close()
 
     row = client.get("/api/evaluations").json()["data"][0]
-    assert row["grades"] == {
-        "accuracy": "A", "fluency": "C", "completeness": "F", "pronunciation_score": "B",
-    }
+
+    assert row["accuracy_score"] == 95
+    assert row["fluency_score"] == 72      # .5는 짝수로 반올림된다(파이썬 기본)
+    assert row["completeness_score"] == 56
+    assert row["pronunciation_score"] == 88
+    assert "grades" not in row
+
+    detail = client.get(f"/api/projects/{project_id}").json()["data"]["evaluations"][0]
+    assert detail["accuracy_score"] == 95
+    assert "grades" not in detail
+
+
+def test_missing_score_stays_null_not_zero(db_session_factory):
+    """평가에 실패해 점수가 없는 것과 0점은 다르다. 0으로 채우면 F를 받은 것처럼 보인다."""
+    project_id = _project(db_session_factory)
+    db = db_session_factory()
+    try:
+        db.add(models.PronunciationEvaluation(project_id=project_id))
+        db.commit()
+    finally:
+        db.close()
+
+    row = client.get("/api/evaluations").json()["data"][0]
+    assert row["accuracy_score"] is None
+    assert row["pronunciation_score"] is None
 
 
 # ---------------------------------------------------------------- 2. 프로젝트명 수정

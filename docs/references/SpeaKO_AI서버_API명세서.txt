@@ -483,21 +483,40 @@
       "evaluation_id": 5,
       "slide_number": 3,              // 슬라이드별 녹음이면 그 번호, 전체 녹음이면 null
       "overall_scores": {
-        "accuracy": 87.4,             // 정확도
-        "fluency": 82.1,              // 유창성
-        "completeness": 95.0,         // 완성도
-        "pronunciation_score": 84.3   // 종합 발음 점수 (화면의 "총점"에 사용)
-      },
-      "grades": {                     // 같은 점수를 A~F 로 환산한 값
-        "accuracy": "B", "fluency": "B",
-        "completeness": "A", "pronunciation_score": "B"
+        "accuracy": 87,               // 정확도       (0~100 정수)
+        "fluency": 82,                // 유창성
+        "completeness": 95,           // 완성도
+        "pronunciation_score": 84     // 종합 발음 점수 (화면의 "총점"에 사용)
       },
       "reference_text": "Slide 1: 안녕하세요 ...",   // 채점 기준이 된 대본 (오프셋의 기준)
       "recognized_text": "AI가 실제로 인식한 문장",
       "words_detail": [
-        { "word": "발전", "accuracy_score": 52.0, "error_type": "Mispronunciation",
+        { "word": "발전", "accuracy_score": 52, "error_type": "Mispronunciation",
           "reference_span": [12, 14], "recognized_span": [10, 12] }
-      ]
+      ],
+      "highlights": {                 // 결과창에 칠할 것 (level "error" 만 빨강)
+        "reference":  [ { "word": "인프라", "start": 12, "end": 15,
+                          "type": "omission", "level": "error",
+                          "reason": "대본에 있지만 말하지 않았습니다." } ],
+        "recognized": [ { "word": "음", "start": 6, "end": 7,
+                          "type": "insertion", "level": "error",
+                          "reason": "대본에 없는 말을 했습니다." } ],
+        "counts": { "omission": 5, "insertion": 1, "mispronunciation": 2, "error": 6 },
+        "has_errors": true
+      },
+      "deductions": {                 // 상세 피드백의 근거 = 감점 요인
+        "factors": [
+          { "key": "omission", "label": "대본 누락", "count": 5, "ratio_percent": 55.6,
+            "affects": ["completeness"], "severity": "high",
+            "examples": ["인프라", "첫째로"],
+            "message": "대본에 있는 단어 5개를 읽지 않았습니다(대본의 55.6%). ..." }
+        ],
+        "counts": { "omission": 5, "insertion": 1, "mispronunciation": 2,
+                    "filler": 1, "pause": 1 },
+        "scores": { "accuracy": 72, "fluency": 64,
+                    "completeness": 40, "pronunciation_score": 58 },
+        "primary": "omission"
+      }
     }
 
     ※ 이 응답은 data 로 감싸지 않고 평평하게 내려옵니다.
@@ -505,21 +524,30 @@
 
   ● error_type 값
     "None"              정상적으로 읽음
-    "Mispronunciation"  잘못 발음함
-    "Omission"          읽지 않고 건너뜀
+    "Mispronunciation"  발음이 흐림 (단어는 맞게 읽음)
+    "Omission"          읽지 않고 건너뜀        → 틀린 워딩 (빨강)
+    "Insertion"         대본에 없는 말을 함     → 틀린 워딩 (빨강)
 
   ● 참고
-    - ★ 화면에는 등급(grades)만 표기합니다. 숫자 점수는 화면에 쓰지 마세요.
-        (제품 결정, 2026-08-09)
-        예외는 종합 점수의 원형 게이지 하나입니다. 호(arc)를 몇 % 채울지 계산하려면
-        0~100 숫자가 필요해서 pronunciation_score 를 씁니다.
-        게이지 안에 적는 글자는 "등급", 숫자는 채우는 비율 계산에만.
-    - 점수는 소수점 1자리(0~100)로 계속 옵니다. 위 게이지 계산과 기록 보관용입니다. (0~5점 아님)
+    - ★ 점수는 0~100 "정수" 입니다. 화면에 그대로 쓰세요. (2026-08-15 변경)
+        · 등급(grades) 필드는 없앴습니다. 옛 코드가 읽고 있으면 undefined 가 됩니다.
+        · 소수점도 없앴습니다. 87.4 가 아니라 87 입니다.
+        · 원형 게이지 채움 비율은 그대로 pronunciation_score / 100 으로 계산하면 됩니다.
       ※ 랜딩 페이지 문구에 "0~5점으로 평가"가 남아 있는데 옛 값입니다. PM 확인 필요.
-    - grades 등급 기준 (서버가 한 곳에서 정합니다)
-         A: 90 이상 / B: 80 이상 / C: 70 이상 / D: 60 이상 / F: 60 미만
-      GET /api/evaluations, GET /api/projects/{id} 의 평가 이력에도 같은 grades 가 들어 있습니다.
-      코칭 내역 목록도 등급으로 표기하세요.
+    - ★ 결과창 하이라이팅은 highlights 를 그대로 쓰세요. words_detail 로 직접 계산하지 마세요.
+        틀린 워딩(빨강) = 누락(omission) + 대본에 없는 말(insertion) 두 가지뿐입니다.
+        발음이 흐린 것(mispronunciation)은 level 이 "warning" 이라 빨강이 아닙니다 —
+        단어를 틀리게 읽은 게 아니어서, 같은 빨강으로 칠하면 잘못된 인상을 줍니다.
+        start/end 는 응답의 reference_text / recognized_text 기준 문자 오프셋입니다.
+        위치를 확신 못 하는 단어는 목록에서 빠지므로 counts 와 목록 길이가 다를 수 있습니다.
+        (뱃지 숫자는 counts, 칠할 자리는 목록)
+    - ★ deductions.factors 는 심각한 순 정렬이고 message 가 완성된 문장입니다.
+        AI 피드백을 안 불러도 상세 피드백 화면을 그릴 수 있습니다.
+        요인별 감점 폭(몇 점 깎였는지)은 Azure 가 공개하지 않아 내려가지 않습니다.
+        "누락 -12점" 처럼 쓰지 말고, affects 가 가리키는 점수를 scores 에서 꺼내
+        "완성도 40 - 대본 누락 5개 때문입니다" 형태로 이으세요.
+      GET /api/evaluations 에는 highlight_counts(개수만),
+      GET /api/projects/{id} 의 평가 이력에는 highlights(위치까지) 가 들어 있습니다.
     - recognized_text 와 원본 대본을 좌우로 놓으면 "원본 <-> 인식 텍스트" 비교 화면이 됩니다.
       좌우 하이라이트는 reference_span / recognized_span 으로 칠합니다.
         · 둘 다 [시작, 끝] 문자 인덱스입니다. null 이면 그쪽 텍스트에는 없다는 뜻입니다

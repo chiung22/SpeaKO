@@ -48,8 +48,8 @@ from utils.text_heuristics import extract_frequent_terms
 from utils.stdict_client import StdictClient
 from utils.hangul_phonology import has_liaison_pattern
 from utils import phonology_rules
-from utils import score_grade
 from utils import speech_metrics
+from utils import error_highlights
 from utils import thumbnail_generator
 from utils import docx_builder
 from utils.body_limit import MaxBodySizeMiddleware
@@ -372,62 +372,42 @@ class SlideCreateRequest(BaseModel):
     source_content: Optional[str] = Field("", max_length=MAX_SCRIPT_TEXT_LEN)
 
 
-def _attach_error_spans(words_detail, reference_text: str, recognized_text: str) -> None:
-    """단어마다 원본/인식 텍스트 안에서의 위치(문자 오프셋)를 붙인다. 리스트를 제자리에서 수정한다.
+def _int_score(value):
+    """점수를 0~100 정수로 정리한다. 값이 없으면 None.
 
-    왜 필요한가: 피그마 Feedback Page는 틀린 부분을 **원본과 인식 양쪽에** 강조한다.
-    `error_type`만으로는 같은 단어가 여러 번 나올 때 어느 것을 칠할지 정할 수 없다.
+    ⚠️ 한동안 소수 1자리(87.4)로 내려보냈다가 **정수로 되돌렸다**(2026-08-15, 사용자 지정).
+    화면이 `87점 / 100`으로 그리는데 소수점이 붙으면 자릿수가 흔들려 레이아웃이 밀리고,
+    발표 점수에서 0.4점 차이는 사용자에게 의미가 없다.
 
-    Azure는 단어를 발화 순서대로 돌려주므로, 각 텍스트를 커서로 훑으며 앞에서부터 맞춰간다.
-    - Omission(빠뜨림): 원본에만 있다 → recognized_span은 None
-    - Insertion(덧붙임): 실제로 말한 것뿐이다 → reference_span은 None
-    찾지 못하면(문장부호·정규화 차이 등) 억지로 맞추지 않고 None으로 둔다 — 엉뚱한 곳을
-    칠하느니 칠하지 않는 편이 낫다.
+    bool은 int의 하위 타입이라 따로 막는다(True가 1점이 되면 조용히 틀린다).
+    NaN/Inf는 int()가 터지므로 None으로 떨어뜨린다 — 점수 하나 때문에 평가가 500이 되면 안 된다.
     """
-    if not words_detail:
-        return
-
-    reference_text = reference_text or ""
-    recognized_text = recognized_text or ""
-    ref_cursor = 0
-    rec_cursor = 0
-
-    for entry in words_detail:
-        word = (entry.get("word") or "").strip()
-        error_type = entry.get("error_type")
-        entry["reference_span"] = None
-        entry["recognized_span"] = None
-        if not word:
-            continue
-
-        if error_type != "Insertion":
-            found = reference_text.find(word, ref_cursor)
-            if found != -1:
-                entry["reference_span"] = [found, found + len(word)]
-                ref_cursor = found + len(word)
-
-        if error_type != "Omission":
-            found = recognized_text.find(word, rec_cursor)
-            if found != -1:
-                entry["recognized_span"] = [found, found + len(word)]
-                rec_cursor = found + len(word)
+    if value is None or isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        return int(round(value))
+    except (ValueError, OverflowError):
+        return None
 
 
 def _round_scores_in_place(result: dict):
     """
-    발음 평가 점수를 소수 1자리(0~100)로 정리한다. 프론트는 이 숫자를 그대로 표시만 하므로
-    표시 형태를 백엔드에서 확정하는데, 0~5점 같은 거친 척도로 뭉개지 말고 소수점까지
-    자세히(예: 87.4) 내려줘서 미세한 발음 차이가 드러나게 한다.
-    전체 점수(overall_scores)와 단어별 정확도(words_detail)를 모두 처리.
+    발음 평가 점수를 0~100 **정수**로 정리한다. 프론트는 이 숫자를 그대로 표시만 하므로
+    표시 형태를 백엔드에서 확정한다.
+    전체 점수(overall_scores)와 단어별 정확도(words_detail)를 모두 처리한다 — 한 화면에
+    "종합 87"과 "구축의 55.5"가 같이 뜨면 어느 쪽이 기준인지 알 수 없다.
     """
     scores = result.get("overall_scores")
     if isinstance(scores, dict):
         for key, value in list(scores.items()):
-            if isinstance(value, (int, float)):
-                scores[key] = round(value, 1)
+            rounded = _int_score(value)
+            if rounded is not None:
+                scores[key] = rounded
     for word in result.get("words_detail") or []:
-        if isinstance(word, dict) and isinstance(word.get("accuracy_score"), (int, float)):
-            word["accuracy_score"] = round(word["accuracy_score"], 1)
+        if isinstance(word, dict):
+            rounded = _int_score(word.get("accuracy_score"))
+            if rounded is not None:
+                word["accuracy_score"] = rounded
 
 
 # ==========================================
@@ -1082,7 +1062,9 @@ async def evaluate_pronunciation(
         _round_scores_in_place(result)
         # 틀린 부분을 원본·인식 양쪽에서 강조하려면(피그마 Feedback Page) 단어가 각 텍스트의
         # 어디에 있는지 알아야 한다. error_type만으로는 같은 단어가 여러 번 나올 때 못 고른다.
-        _attach_error_spans(result.get("words_detail"), text_to_evaluate, result.get("recognized_text"))
+        error_highlights.attach_spans(
+            result.get("words_detail"), text_to_evaluate, result.get("recognized_text")
+        )
         # 간투어("음…", "어…")와 멈춤은 Azure 점수에 안 드러나지만 발표 코칭에서는 제일 자주
         # 지적되는 부분이다. 단어 목록에서 따로 계산해 결과와 함께 저장한다.
         metrics = speech_metrics.analyze(result.get("words_detail"))
@@ -1112,12 +1094,20 @@ async def evaluate_pronunciation(
             # 프론트가 어느 텍스트에 대고 칠해야 할지 알 수 없다(대본을 이어붙이며 "Slide N:"
             # 접두어가 붙으므로 프론트가 가진 원본과 인덱스가 다르다).
             "reference_text": text_to_evaluate,
-            # 피그마 Feedback Page ㊶는 점수와 함께 등급(A~F)을 그린다. 프론트가 각자 변환하면
-            # 화면마다 기준이 달라질 수 있어서 서버가 한 곳에서 정한다(utils/score_grade.py).
-            "grades": score_grade.grades_for(result.get("overall_scores")),
             **result,
             # **result 뒤에 둬서, 평가 모듈이 같은 키를 주더라도 여기서 계산한 값이 이긴다.
             "speech_metrics": metrics,
+            # 결과 화면이 그대로 칠할 강조 목록. level이 "error"인 것만 빨간색이다
+            # (틀린 워딩 = 누락 + 대본에 없는 말. 발음 부정확은 warning으로 따로 나간다).
+            # 두 텍스트를 같이 넘겨서, 잘라낸 자리에 정말 그 단어가 있는지 확인하고 내보낸다.
+            "highlights": error_highlights.build_highlights(
+                result.get("words_detail"), text_to_evaluate, result.get("recognized_text")
+            ),
+            # 상세 피드백이 근거로 쓰는 감점 요인. HCX를 부르기 전에도 화면에 띄울 수 있도록
+            # 각 요인의 message를 서버가 문장으로 써서 내려준다.
+            "deductions": error_highlights.summarize_deductions(
+                result.get("words_detail"), result.get("overall_scores"), metrics
+            ),
         }
     except HTTPException:
         raise
@@ -1150,27 +1140,36 @@ async def create_evaluation_feedback(evaluation_id: int, db: Session = Depends(g
         # 지난 평가 화면만 깨지므로 읽을 때 새 형식으로 맞춰준다.
         cached = dict(evaluation.feedback)
         cached["practice_tips"] = normalize_practice_tips(cached.get("practice_tips"))
+        # 감점 요인을 넣기 전에 만들어진 피드백에는 이 키가 없다. 저장된 words_detail로 지금
+        # 계산해서 채운다(HCX를 다시 부르지 않는다 — 순수 계산이라 공짜다).
+        if not cached.get("deductions"):
+            cached["deductions"] = error_highlights.summarize_deductions(
+                evaluation.words_detail, _overall_scores(evaluation), evaluation.speech_metrics
+            )
         return {"success": True, "evaluation_id": evaluation.id, "data": cached, "cached": True}
 
-    overall_scores = {
-        "accuracy": evaluation.accuracy_score,
-        "fluency": evaluation.fluency_score,
-        "completeness": evaluation.completeness_score,
-        "pronunciation_score": evaluation.pronunciation_score,
-    }
+    overall_scores = _overall_scores(evaluation)
     weak_words = collect_weak_words(evaluation.words_detail)
     # 칭찬에도 근거가 필요하다 — 안 주면 모델이 대본에서 아무 단어나 골라 "잘 발음했다"고 지어낸다.
     strong_words = collect_strong_words(evaluation.words_detail)
     script_excerpt = _compiled_script_text(evaluation.project) if evaluation.project else ""
+    # 상세 피드백의 핵심 근거. 누락은 아예 안 읽은 단어라 weak_words에 없고, 간투어·멈춤은
+    # Azure 점수에 없다. 이걸 안 넘기면 완성도가 39점이어도 발음 얘기만 하는 피드백이 나온다.
+    deductions = error_highlights.summarize_deductions(
+        evaluation.words_detail, overall_scores, evaluation.speech_metrics
+    )
 
     feedback = await run_in_threadpool(
-        feedback_generator.generate_feedback, overall_scores, weak_words, script_excerpt, strong_words
+        feedback_generator.generate_feedback,
+        overall_scores, weak_words, script_excerpt, strong_words, deductions,
     )
     if not feedback:
         raise HTTPException(status_code=502, detail="발음 피드백 생성에 실패했습니다.")
 
     # 어떤 단어를 근거로 지적했는지 프론트가 함께 보여줄 수 있도록 같이 저장한다.
     feedback["weak_words"] = weak_words
+    # 감점 요인은 화면에 그대로 뜨는 값이라(각 factor.message가 완성된 문장이다) 함께 남긴다.
+    feedback["deductions"] = deductions
     evaluation.feedback = feedback
     db.commit()
     db.refresh(evaluation)
@@ -1213,13 +1212,14 @@ async def list_evaluations(db: Session = Depends(get_db)):
                 "project_id": e.project_id,
                 "project_name": e.project.name if e.project else None,
                 "slide_number": e.slide_number,  # 슬라이드별 녹음이면 그 번호, 전체 녹음이면 null
-                "accuracy_score": e.accuracy_score,
-                "fluency_score": e.fluency_score,
-                "completeness_score": e.completeness_score,
-                "pronunciation_score": e.pronunciation_score,
-                "grades": _evaluation_grades(e),  # A~F (피그마 Feedback Page)
+                **_evaluation_scores(e),  # 0~100 정수
                 "feedback": e.feedback,  # 아직 생성 안 했으면 null
                 "speech_metrics": e.speech_metrics,  # 간투어·멈춤·발화 속도
+                # 목록 화면엔 "누락 12 · 삽입 3"처럼 개수만 필요하다. 강조 위치(span)까지는
+                # 무거워서 안 싣는다 — 상세 화면(/api/projects/{id})에서 받아 간다.
+                "highlight_counts": error_highlights.build_highlights(
+                    e.words_detail, e.reference_text, e.recognized_text
+                )["counts"],
                 "reference_text": e.reference_text,   # 원본 대본
                 "recognized_text": e.recognized_text,  # Azure가 실제로 인식한 텍스트
                 "created_at": e.created_at.isoformat(),
@@ -1262,16 +1262,17 @@ async def get_project(project_id: int, db: Session = Depends(get_db)):
                 {
                     "id": e.id,
                     "slide_number": e.slide_number,  # 슬라이드별 녹음이면 그 번호, 전체 녹음이면 null
-                    "accuracy_score": e.accuracy_score,
-                    "fluency_score": e.fluency_score,
-                    "completeness_score": e.completeness_score,
-                    "pronunciation_score": e.pronunciation_score,
-                    "grades": _evaluation_grades(e),  # A~F (피그마 Feedback Page)
+                    **_evaluation_scores(e),  # 0~100 정수
                     "feedback": e.feedback,  # 아직 생성 안 했으면 null
                     "speech_metrics": e.speech_metrics,  # 간투어·멈춤·발화 속도
                     "reference_text": e.reference_text,   # 원본 대본
                     "recognized_text": e.recognized_text,  # Azure가 실제로 인식한 텍스트
                     "words_detail": e.words_detail,        # 단어별 점수(하이라이팅용)
+                    # 결과 화면이 그대로 칠할 강조 목록. level "error"만 빨간색이다.
+                    # span이 없는 예전 기록도 여기서 원본/인식 텍스트로 다시 맞춰준다.
+                    "highlights": error_highlights.build_highlights(
+                        e.words_detail, e.reference_text, e.recognized_text
+                    ),
                     "created_at": e.created_at.isoformat(),
                 }
                 for e in project.evaluations
@@ -1397,18 +1398,32 @@ async def download_highlighted_script_docx(project_id: int, db: Session = Depend
     return _docx_response(content, f"하이라이팅_{project.name}.docx")
 
 
-def _evaluation_grades(evaluation) -> dict:
-    """저장된 평가 행 → 등급 dict(피그마 Feedback Page ㊶).
+def _overall_scores(evaluation) -> dict:
+    """저장된 평가 행 → 피드백·감점 요인이 쓰는 키 이름(`accuracy` …)의 정수 점수 dict.
 
-    이력 조회 응답은 스키마가 flat이라(accuracy_score …) 키 이름이 평가 직후 응답과 다르다.
-    등급 기준은 한 곳(utils/score_grade.py)에만 두려고 여기서 이름만 맞춰 넘긴다.
+    이력 조회 응답은 스키마가 flat이라(`accuracy_score` …) 키 이름이 다르다. 두 이름을
+    한 곳에서만 갈아끼우려고 분리했다.
     """
-    return score_grade.grades_for({
-        "accuracy": evaluation.accuracy_score,
-        "fluency": evaluation.fluency_score,
-        "completeness": evaluation.completeness_score,
-        "pronunciation_score": evaluation.pronunciation_score,
-    })
+    return {
+        "accuracy": _int_score(evaluation.accuracy_score),
+        "fluency": _int_score(evaluation.fluency_score),
+        "completeness": _int_score(evaluation.completeness_score),
+        "pronunciation_score": _int_score(evaluation.pronunciation_score),
+    }
+
+
+def _evaluation_scores(evaluation) -> dict:
+    """저장된 평가 행 → 0~100 정수 점수 dict.
+
+    저장된 값을 그대로 쓰지 않고 한 번 더 거르는 이유: 정수로 바꾸기 전(2026-08-15 이전)에
+    저장된 행들은 소수(87.4)로 남아 있다. 옛 기록만 소수로 보이면 안 된다.
+    """
+    return {
+        "accuracy_score": _int_score(evaluation.accuracy_score),
+        "fluency_score": _int_score(evaluation.fluency_score),
+        "completeness_score": _int_score(evaluation.completeness_score),
+        "pronunciation_score": _int_score(evaluation.pronunciation_score),
+    }
 
 
 def _slides_payload(project: "models.Project") -> list:

@@ -1,90 +1,78 @@
-<mxfile host="app.diagrams.net" modified="2026-08-14T02:00:00.000Z" agent="SpeaKO" version="24.0.0">
+<mxfile host="app.diagrams.net" agent="SpeaKO">
   <diagram id="speako-infra" name="SpeaKO 인프라">
-    <mxGraphModel dx="1400" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1169" pageHeight="826" math="0" shadow="0">
+    <mxGraphModel dx="1414" dy="743" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1169" pageHeight="826" math="0" shadow="0">
       <root>
         <mxCell id="0" />
         <mxCell id="1" parent="0" />
-
-        <mxCell id="ec2" value="AWS EC2 · t3.small · 2 vCPU 2GB · ap-northeast-2" style="rounded=1;whiteSpace=wrap;html=1;dashed=1;dashPattern=8 6;fillColor=none;strokeColor=#9673A6;verticalAlign=top;fontSize=12;fontColor=#6C4A85;align=left;spacingLeft=12;spacingTop=6;" vertex="1" parent="1">
-          <mxGeometry x="240" y="70" width="390" height="530" as="geometry" />
+        <mxCell id="ec2" parent="1" style="rounded=1;whiteSpace=wrap;html=1;dashed=1;dashPattern=8 6;fillColor=none;strokeColor=#9673A6;verticalAlign=top;fontSize=12;fontColor=#6C4A85;align=left;spacingLeft=12;spacingTop=6;" value="AWS EC2 · t3.small · 2 vCPU 2GB · ap-northeast-2" vertex="1">
+          <mxGeometry height="530" width="390" x="240" y="70" as="geometry" />
         </mxCell>
-
-        <mxCell id="user" value="사용자&#10;브라우저" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#666666;fontSize=13;" vertex="1" parent="1">
-          <mxGeometry x="40" y="140" width="150" height="60" as="geometry" />
+        <mxCell id="user" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#666666;fontSize=13;" value="사용자&#xa;브라우저" vertex="1">
+          <mxGeometry height="60" width="150" x="40" y="140" as="geometry" />
         </mxCell>
-
-        <mxCell id="fe" value="프론트엔드&#10;React · Vercel&#10;speakofront.vercel.app" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#666666;fontSize=13;" vertex="1" parent="1">
-          <mxGeometry x="40" y="255" width="150" height="80" as="geometry" />
+        <mxCell id="fe" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#666666;fontSize=13;" value="프론트엔드&#xa;React · Vercel&#xa;speakofront.vercel.app" vertex="1">
+          <mxGeometry height="80" width="150" x="40" y="255" as="geometry" />
         </mxCell>
-
-        <mxCell id="spring" value="Spring Boot :8080 (외부 공개)&#10;Spring Security · JWT 인증/인가" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E1D5F5;strokeColor=#6C4A85;fontSize=13;fontStyle=1" vertex="1" parent="1">
-          <mxGeometry x="265" y="120" width="340" height="80" as="geometry" />
+        <mxCell id="spring" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E1D5F5;strokeColor=#6C4A85;fontSize=13;fontStyle=1" value="Spring Boot :8080 (외부 공개)&#xa;Spring Security · JWT 인증/인가" vertex="1">
+          <mxGeometry height="80" width="340" x="265" y="120" as="geometry" />
         </mxCell>
-
-        <mxCell id="mysql" value="MySQL 8&#10;같은 인스턴스 :3306&#10;회원 · 발표 · 대본 · 평가" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=12;fillColor=#FFFFFF;strokeColor=#666666;fontSize=12;" vertex="1" parent="1">
-          <mxGeometry x="265" y="280" width="150" height="110" as="geometry" />
+        <mxCell id="mysql" parent="1" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=12;fillColor=#FFFFFF;strokeColor=#666666;fontSize=12;" value="MySQL 8&#xa;같은 인스턴스 :3306&#xa;회원 · 발표 · 대본 · 평가" vertex="1">
+          <mxGeometry height="110" width="150" x="265" y="280" as="geometry" />
         </mxCell>
-
-        <mxCell id="ai" value="AI 서버 · FastAPI · Docker&#10;127.0.0.1:8000 (외부 차단)&#10;&#10;SQLite · 작업/평가 이력&#10;ffmpeg · 녹음 변환&#10;LibreOffice · 슬라이드 썸네일&#10;Kiwi · 형태소 분석" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E1D5F5;strokeColor=#6C4A85;fontSize=12;align=center;" vertex="1" parent="1">
-          <mxGeometry x="440" y="280" width="165" height="230" as="geometry" />
+        <mxCell id="ai" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E1D5F5;strokeColor=#6C4A85;fontSize=12;align=center;" value="AI 서버 · FastAPI · Docker&#xa;127.0.0.1:8000 (외부 차단)&#xa;&#xa;SQLite · 작업/평가 이력&#xa;ffmpeg · 녹음 변환&#xa;LibreOffice · 슬라이드 썸네일&#xa;Kiwi · 형태소 분석" vertex="1">
+          <mxGeometry height="230" width="165" x="440" y="280" as="geometry" />
         </mxCell>
-
-        <mxCell id="s3" value="Amazon S3&#10;speako-storage-2026 (비공개)&#10;발표 자료 원본 PPTX/PDF" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=12;fillColor=#FFFFFF;strokeColor=#666666;fontSize=12;" vertex="1" parent="1">
-          <mxGeometry x="700" y="115" width="220" height="100" as="geometry" />
+        <mxCell id="s3" parent="1" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=12;fillColor=#FFFFFF;strokeColor=#666666;fontSize=12;" value="Amazon S3&#xa;speako-storage-2026 (비공개)&#xa;발표 자료 원본 PPTX/PDF" vertex="1">
+          <mxGeometry height="100" width="220" x="700" y="115" as="geometry" />
         </mxCell>
-
-        <mxCell id="hcx" value="HyperCLOVA X&#10;대본 생성 · 발음 피드백 · 이미지 텍스트 인식" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#666666;fontSize=12;" vertex="1" parent="1">
-          <mxGeometry x="700" y="280" width="220" height="60" as="geometry" />
+        <mxCell id="hcx" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#666666;fontSize=12;" value="HyperCLOVA X&#xa;대본 생성 · 발음 피드백 · 이미지 텍스트 인식" vertex="1">
+          <mxGeometry height="60" width="220" x="700" y="280" as="geometry" />
         </mxCell>
-
-        <mxCell id="azure" value="Azure Speech&#10;발음 평가 (단어별 점수)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#666666;fontSize=12;" vertex="1" parent="1">
-          <mxGeometry x="700" y="360" width="220" height="60" as="geometry" />
+        <mxCell id="azure" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#666666;fontSize=12;" value="Azure Speech&#xa;발음 평가 (단어별 점수)" vertex="1">
+          <mxGeometry height="60" width="220" x="700" y="360" as="geometry" />
         </mxCell>
-
-        <mxCell id="clova" value="Clova Voice&#10;표준 발음 듣기 (TTS)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#666666;fontSize=12;" vertex="1" parent="1">
-          <mxGeometry x="700" y="440" width="220" height="60" as="geometry" />
+        <mxCell id="clova" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#666666;fontSize=12;" value="Clova Voice&#xa;표준 발음 듣기 (TTS)" vertex="1">
+          <mxGeometry height="60" width="220" x="700" y="440" as="geometry" />
         </mxCell>
-
-        <mxCell id="stdict" value="표준국어대사전&#10;장단음 조회" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#666666;fontSize=12;" vertex="1" parent="1">
-          <mxGeometry x="700" y="520" width="220" height="60" as="geometry" />
+        <mxCell id="stdict" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#666666;fontSize=12;" value="표준국어대사전&#xa;장단음 조회" vertex="1">
+          <mxGeometry height="60" width="220" x="700" y="520" as="geometry" />
         </mxCell>
-
-        <mxCell id="e1" value="HTTPS" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;strokeColor=#666666;" edge="1" parent="1" source="user" target="fe">
+        <mxCell id="e1" edge="1" parent="1" source="user" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;strokeColor=#666666;" target="fe" value="HTTPS">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-
-        <mxCell id="e2" value="REST" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;strokeColor=#6C4A85;strokeWidth=2;" edge="1" parent="1" source="fe" target="spring">
+        <mxCell id="e2" edge="1" parent="1" source="fe" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;strokeColor=#6C4A85;strokeWidth=2;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" target="spring" value="REST">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="215" y="295" />
+              <mxPoint x="215" y="160" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e3" edge="1" parent="1" source="spring" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;strokeColor=#666666;" target="mysql" value="JDBC">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-
-        <mxCell id="e3" value="JDBC" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;strokeColor=#666666;" edge="1" parent="1" source="spring" target="mysql">
+        <mxCell id="e4" edge="1" parent="1" source="spring" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;strokeColor=#666666;" target="s3" value="AWS SDK">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-
-        <mxCell id="e4" value="AWS SDK" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;strokeColor=#666666;" edge="1" parent="1" source="spring" target="s3">
+        <mxCell id="e5" edge="1" parent="1" source="spring" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;strokeColor=#6C4A85;strokeWidth=2;" target="ai" value="X-API-Key">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-
-        <mxCell id="e5" value="X-API-Key" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;strokeColor=#6C4A85;strokeWidth=2;" edge="1" parent="1" source="spring" target="ai">
+        <mxCell id="e6" edge="1" parent="1" source="ai" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;strokeColor=#666666;" target="hcx" value="HTTPS">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-
-        <mxCell id="e6" value="HTTPS" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;strokeColor=#666666;" edge="1" parent="1" source="ai" target="hcx">
+        <mxCell id="e7" edge="1" parent="1" source="ai" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;strokeColor=#666666;" target="azure" value="HTTPS">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-
-        <mxCell id="e7" value="HTTPS" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;strokeColor=#666666;" edge="1" parent="1" source="ai" target="azure">
+        <mxCell id="e8" edge="1" parent="1" source="ai" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;strokeColor=#666666;" target="clova" value="HTTPS">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-
-        <mxCell id="e8" value="HTTPS" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;strokeColor=#666666;" edge="1" parent="1" source="ai" target="clova">
-          <mxGeometry relative="1" as="geometry" />
+        <mxCell id="e9" edge="1" parent="1" source="ai" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;strokeColor=#666666;" target="stdict" value="HTTPS">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="523" y="550" />
+            </Array>
+          </mxGeometry>
         </mxCell>
-
-        <mxCell id="e9" value="HTTPS" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;strokeColor=#666666;" edge="1" parent="1" source="ai" target="stdict">
-          <mxGeometry relative="1" as="geometry" />
-        </mxCell>
-
       </root>
     </mxGraphModel>
   </diagram>

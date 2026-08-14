@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import Column, Integer, String, Text, JSON, DateTime, Float, ForeignKey
+from sqlalchemy import Column, Integer, String, Text, JSON, DateTime, ForeignKey
 from sqlalchemy.orm import relationship
 
 from db.database import Base
@@ -85,10 +85,14 @@ class PronunciationEvaluation(Base):
     # 슬라이드별로 나눠 녹음한 경우 그 슬라이드 번호. 대본 전체를 한 번에 녹음했으면 None.
     # (코칭 내역에서 "3번 슬라이드 87점"처럼 구분하려면 이게 남아 있어야 한다)
     slide_number = Column(Integer, nullable=True)
-    accuracy_score = Column(Float, nullable=True)
-    fluency_score = Column(Float, nullable=True)
-    completeness_score = Column(Float, nullable=True)
-    pronunciation_score = Column(Float, nullable=True)
+    # 0~100 정수. Azure는 소수를 주지만 저장 전에 반올림한다(main._round_scores_in_place).
+    # ⚠️ 2026-08-15 이전에 저장된 행에는 소수(87.4)가 그대로 남아 있다. SQLite는 선언한
+    #    타입을 강제하지 않아 그 값이 그대로 읽히므로, 조회할 때 한 번 더 정수로 거른다
+    #    (main._int_score). 옛 기록만 소수로 보이면 안 된다.
+    accuracy_score = Column(Integer, nullable=True)
+    fluency_score = Column(Integer, nullable=True)
+    completeness_score = Column(Integer, nullable=True)
+    pronunciation_score = Column(Integer, nullable=True)
     words_detail = Column(JSON, nullable=True)
     # 평가 기준으로 쓴 원본 대본과, Azure가 실제로 인식한 텍스트. 결과 화면에서 둘을 나란히 놓고
     # 어디를 다르게 읽었는지 비교한다(피그마 Feedback Page: 원본 텍스트 ↔ 인식 텍스트).
