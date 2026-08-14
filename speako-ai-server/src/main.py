@@ -19,6 +19,7 @@ from concurrent.futures import ThreadPoolExecutor
 import uvicorn
 import os
 import re
+import shutil
 import uuid
 import hmac
 from urllib.parse import quote
@@ -49,6 +50,7 @@ from utils.hangul_phonology import has_liaison_pattern
 from utils import phonology_rules
 from utils import score_grade
 from utils import speech_metrics
+from utils import thumbnail_generator
 from utils import docx_builder
 from utils.body_limit import MaxBodySizeMiddleware
 from utils.rate_limit import RateLimitMiddleware
@@ -66,6 +68,11 @@ job_executor = ThreadPoolExecutor(
     thread_name_prefix="script-job",
 )
 job_session_factory = SessionLocal
+
+# 썸네일 변환(LibreOffice)은 한 번에 200~400MB를 잡는다. 배포된 t3.small(2GB)에서 두 개가
+# 동시에 돌면 스프링이나 MySQL이 OOM으로 죽으므로 **워커 1개**로 직렬화한다.
+# (thumbnail_generator 안에도 전역 락이 있어 이중으로 막는다)
+thumbnail_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="thumbnail")
 
 # 2. FastAPI 앱 인스턴스 생성
 app = FastAPI(
@@ -434,8 +441,66 @@ api = APIRouter(dependencies=[Depends(verify_api_key)])
 async def root():
     return {"message": "SpeaKO AI 서버가 정상적으로 실행 중입니다!"}
 
+def _run_thumbnail_job(project_id, source_path):
+    """[백그라운드] 슬라이드 썸네일 생성 + 상태 기록.
+
+    업로드 응답을 붙잡지 않으려고 분리했다(27장 변환이 수십 초). 원본 임시 파일은 요청 쪽
+    finally에서 지워지므로, 여기 넘어온 사본을 다 쓰고 나서 직접 지운다.
+    실패해도 예외를 올리지 않는다 — 썸네일 때문에 업로드가 실패로 보이면 안 된다.
+    """
+    status, message = "failed", ""
+    try:
+        result = thumbnail_generator.generate_for_project(project_id, source_path)
+        status, message = result["status"], result["message"]
+        if status == "ready":
+            print(f"🖼️  썸네일 생성 완료: 프로젝트 {project_id}, {result['count']}장")
+        else:
+            print(f"⚠️ 썸네일 생성({project_id}) {status}: {message}")
+    except Exception as err:
+        print(f"❌ 썸네일 작업 중 예기치 못한 오류({project_id}): {err}")
+    finally:
+        if source_path and os.path.exists(source_path):
+            try:
+                os.remove(source_path)
+            except OSError:
+                pass
+
+    db = job_session_factory()
+    try:
+        project = db.get(models.Project, project_id)
+        if project:
+            project.thumbnail_status = status
+            db.commit()
+    except Exception as err:
+        print(f"❌ 썸네일 상태 기록 실패({project_id}): {err}")
+    finally:
+        db.close()
+
+
+def _queue_thumbnails(db: Session, project, upload_path: str, original_filename: str):
+    """업로드된 파일의 사본을 만들어 썸네일 생성을 백그라운드에 맡긴다."""
+    if not thumbnail_generator.is_available():
+        project.thumbnail_status = "unavailable"
+        db.commit()
+        return
+
+    try:
+        source_copy = _safe_temp_path(original_filename)
+        shutil.copyfile(upload_path, source_copy)
+    except OSError as err:
+        print(f"⚠️ 썸네일용 파일 복사 실패({project.id}): {err}")
+        project.thumbnail_status = "failed"
+        db.commit()
+        return
+
+    project.thumbnail_status = "pending"
+    db.commit()
+    thumbnail_executor.submit(_run_thumbnail_job, project.id, source_copy)
+
+
 def _create_project_from_script(db: Session, name: str, script: str):
-    project = models.Project(name=name, filename=None, topic=None, keywords=[])
+    # 대본만 올린 경우엔 그릴 슬라이드 원본이 없다. pending으로 두면 영영 안 끝난 것처럼 보인다.
+    project = models.Project(name=name, filename=None, topic=None, keywords=[], thumbnail_status="skipped")
     project.slides = [models.Slide(slide_number=1, source_content=script, script=script)]
     db.add(project)
     db.commit()
@@ -568,6 +633,10 @@ async def create_project(
             db.commit()
             db.refresh(project)
 
+            # 편집 화면 왼쪽의 슬라이드 미리보기용. 변환이 수십 초 걸려서 응답을 붙잡지 않는다.
+            _queue_thumbnails(db, project, temp_file_path, file.filename or "upload")
+
+            result["thumbnail_status"] = project.thumbnail_status
             return {"success": True, "project_id": project.id, "data": result}
         finally:
             if os.path.exists(temp_file_path):
@@ -1120,6 +1189,7 @@ async def list_projects(db: Session = Depends(get_db)):
                 "name": p.name,
                 "topic": p.topic,
                 "slide_count": len(p.slides),
+                "thumbnail_status": p.thumbnail_status,
                 "created_at": p.created_at.isoformat(),
             }
             for p in projects
@@ -1165,6 +1235,8 @@ async def get_project(project_id: int, db: Session = Depends(get_db)):
     if not project:
         raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다.")
 
+    _thumbnail_numbers = set(thumbnail_generator.available_slide_numbers(project.id))
+
     return {
         "success": True,
         "data": {
@@ -1174,8 +1246,12 @@ async def get_project(project_id: int, db: Session = Depends(get_db)):
             "topic": project.topic,
             "keywords": project.keywords,
             "created_at": project.created_at.isoformat(),
+            # 편집 화면 왼쪽 미리보기 목록. has_thumbnail이 true인 슬라이드만 이미지 요청을 보내면 된다
+            # (없는 걸 요청하면 404가 나고, 프론트는 깨진 이미지 아이콘을 그리게 된다).
+            "thumbnail_status": project.thumbnail_status,
             "slides": [
-                {"slide_number": s.slide_number, "source_content": s.source_content, "script": s.script}
+                {"slide_number": s.slide_number, "source_content": s.source_content, "script": s.script,
+                 "has_thumbnail": s.slide_number in _thumbnail_numbers}
                 for s in project.slides
             ],
             "difficult_words": [
@@ -1213,7 +1289,33 @@ async def delete_project(project_id: int, db: Session = Depends(get_db)):
 
     db.delete(project)
     db.commit()
+    # 썸네일은 DB가 아니라 디스크에 있어서 cascade로 안 지워진다. 안 지우면 계속 쌓인다.
+    thumbnail_generator.clear_project(project_id)
     return {"success": True, "deleted_project_id": project_id}
+
+
+@api.get("/api/projects/{project_id}/slides/{slide_number}/thumbnail")
+async def get_slide_thumbnail(project_id: int, slide_number: int, db: Session = Depends(get_db)):
+    """[슬라이드 미리보기 이미지] 편집 화면 왼쪽 목록에 그릴 PNG를 그대로 돌려준다.
+
+    아직 생성 중이거나(pending) 변환에 실패한 슬라이드는 404다. 프로젝트 조회 응답의
+    `slides[].has_thumbnail`을 보고 있는 것만 요청하면 깨진 이미지가 안 뜬다."""
+    project = db.get(models.Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다.")
+
+    path = thumbnail_generator.thumbnail_path(project_id, slide_number)
+    if not path:
+        raise HTTPException(
+            status_code=404,
+            detail=f"이 슬라이드의 미리보기가 없습니다. (생성 상태: {project.thumbnail_status or 'unknown'})",
+        )
+
+    with open(path, "rb") as image_file:
+        content = image_file.read()
+    # 한 번 만든 썸네일은 바뀌지 않으므로 브라우저가 오래 캐시하게 둔다.
+    return Response(content=content, media_type="image/png",
+                    headers={"Cache-Control": "public, max-age=86400"})
 
 
 @api.put("/api/projects/{project_id}")

@@ -18,6 +18,9 @@ class Project(Base):
     filename = Column(String, nullable=True)
     topic = Column(String, nullable=True)
     keywords = Column(JSON, nullable=True)  # list[str]
+    # 슬라이드 미리보기(썸네일) 생성 상태. 업로드 직후 pending으로 두고 백그라운드에서 만든다.
+    # pending | ready | failed | unavailable(변환 도구 없음) | skipped(대본만 올린 경우)
+    thumbnail_status = Column(String, nullable=True)
     created_at = Column(DateTime, default=_utcnow, nullable=False)
 
     slides = relationship("Slide", back_populates="project", cascade="all, delete-orphan", order_by="Slide.slide_number")
