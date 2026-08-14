@@ -11,10 +11,11 @@ FROM python:3.12-slim
 #                         impress만 넣는다(전체 libreoffice는 Writer/Calc까지 딸려와 수백 MB 더 커진다).
 #   poppler-utils       : PDF → 슬라이드별 PNG (pdftoppm)
 #   fonts-nanum         : ⚠️ 없으면 한글이 전부 두부(□□□)로 렌더링된다. 썸네일이 무의미해진다.
+#                         (fonts-nanum-coding은 현재 데비안에서 fonts-nanum에 통합돼 별도 설치 불가)
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ffmpeg build-essential \
-        libreoffice-impress poppler-utils fonts-nanum fonts-nanum-coding \
+        libreoffice-impress poppler-utils fonts-nanum \
     && fc-cache -f \
     && rm -rf /var/lib/apt/lists/*
 
