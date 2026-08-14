@@ -1,0 +1,91 @@
+<mxfile host="app.diagrams.net" modified="2026-08-14T02:00:00.000Z" agent="SpeaKO" version="24.0.0">
+  <diagram id="speako-infra" name="SpeaKO 인프라">
+    <mxGraphModel dx="1400" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1169" pageHeight="826" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="ec2" value="AWS EC2 · t3.small · 2 vCPU 2GB · ap-northeast-2" style="rounded=1;whiteSpace=wrap;html=1;dashed=1;dashPattern=8 6;fillColor=none;strokeColor=#9673A6;verticalAlign=top;fontSize=12;fontColor=#6C4A85;align=left;spacingLeft=12;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="240" y="70" width="390" height="530" as="geometry" />
+        </mxCell>
+
+        <mxCell id="user" value="사용자&#10;브라우저" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#666666;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="40" y="140" width="150" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="fe" value="프론트엔드&#10;React · Vercel&#10;speakofront.vercel.app" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#666666;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="40" y="255" width="150" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="spring" value="Spring Boot :8080 (외부 공개)&#10;Spring Security · JWT 인증/인가" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E1D5F5;strokeColor=#6C4A85;fontSize=13;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="265" y="120" width="340" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="mysql" value="MySQL 8&#10;같은 인스턴스 :3306&#10;회원 · 발표 · 대본 · 평가" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=12;fillColor=#FFFFFF;strokeColor=#666666;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="265" y="280" width="150" height="110" as="geometry" />
+        </mxCell>
+
+        <mxCell id="ai" value="AI 서버 · FastAPI · Docker&#10;127.0.0.1:8000 (외부 차단)&#10;&#10;SQLite · 작업/평가 이력&#10;ffmpeg · 녹음 변환&#10;LibreOffice · 슬라이드 썸네일&#10;Kiwi · 형태소 분석" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E1D5F5;strokeColor=#6C4A85;fontSize=12;align=center;" vertex="1" parent="1">
+          <mxGeometry x="440" y="280" width="165" height="230" as="geometry" />
+        </mxCell>
+
+        <mxCell id="s3" value="Amazon S3&#10;speako-storage-2026 (비공개)&#10;발표 자료 원본 PPTX/PDF" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=12;fillColor=#FFFFFF;strokeColor=#666666;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="700" y="115" width="220" height="100" as="geometry" />
+        </mxCell>
+
+        <mxCell id="hcx" value="HyperCLOVA X&#10;대본 생성 · 발음 피드백 · 이미지 텍스트 인식" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#666666;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="700" y="280" width="220" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="azure" value="Azure Speech&#10;발음 평가 (단어별 점수)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#666666;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="700" y="360" width="220" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="clova" value="Clova Voice&#10;표준 발음 듣기 (TTS)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#666666;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="700" y="440" width="220" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="stdict" value="표준국어대사전&#10;장단음 조회" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#666666;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="700" y="520" width="220" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e1" value="HTTPS" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;strokeColor=#666666;" edge="1" parent="1" source="user" target="fe">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e2" value="REST" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;strokeColor=#6C4A85;strokeWidth=2;" edge="1" parent="1" source="fe" target="spring">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e3" value="JDBC" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;strokeColor=#666666;" edge="1" parent="1" source="spring" target="mysql">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e4" value="AWS SDK" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;strokeColor=#666666;" edge="1" parent="1" source="spring" target="s3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e5" value="X-API-Key" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;strokeColor=#6C4A85;strokeWidth=2;" edge="1" parent="1" source="spring" target="ai">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e6" value="HTTPS" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;strokeColor=#666666;" edge="1" parent="1" source="ai" target="hcx">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e7" value="HTTPS" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;strokeColor=#666666;" edge="1" parent="1" source="ai" target="azure">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e8" value="HTTPS" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;strokeColor=#666666;" edge="1" parent="1" source="ai" target="clova">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e9" value="HTTPS" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;strokeColor=#666666;" edge="1" parent="1" source="ai" target="stdict">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
