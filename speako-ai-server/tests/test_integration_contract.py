@@ -59,6 +59,40 @@ def test_unknown_job_id_is_404_not_500():
     assert client.get("/api/script/jobs/없는번호").status_code == 404
 
 
+# ------------------------------------------ project_id를 잘못 보냈을 때 원인이 드러나는가
+#
+# 실제로 겪은 상황(2026-08-15): 스프링의 `ai_project_id`가 전부 null이었다. 우리 응답은
+#   { "success": true, "project_id": 16, "data": {...} }
+# 인데 project_id가 (1) `data` 안이 아니라 **최상위**이고 (2) **snake_case**라, 자바 DTO가
+# `data.projectId`로 읽으면 조용히 null이 된다. 그러면 스프링은 null이나 자기 쪽 ID를 보내고,
+# 그 사실이 **발음 평가 404에서 처음 드러난다.**
+#
+# 그때 "프로젝트를 찾을 수 없습니다"만 오면 어느 쪽 ID를 보냈는지 알 수 없어서, 상대는 재시도만
+# 반복한다. 그래서 응답 본문이 **무슨 값을 받았고 어디서 가져와야 하는지**까지 말하게 고정한다.
+
+def test_bad_project_id_on_audio_says_which_id_and_where_to_get_it():
+    response = client.post(
+        "/api/evaluation/audio",
+        data={"project_id": "999999"},
+        files={"audio_file": ("rec.m4a", io.BytesIO(b"fake audio"), "audio/mp4")},
+    )
+    assert response.status_code == 404
+    detail = response.json()["detail"]
+    # 받은 값을 되짚어줘야 스프링 로그와 대조할 수 있다.
+    assert "999999" in detail
+    # 어디서 가져와야 하는지까지 알려준다 — 이게 없으면 상대가 같은 실수를 반복한다.
+    assert "POST /api/projects" in detail
+
+
+def test_missing_project_id_is_422_not_500():
+    """`ai_project_id`가 null이면 스프링이 빈 값을 실어 보낼 수 있다. 그건 클라이언트 잘못이라 4xx다."""
+    response = client.post(
+        "/api/evaluation/audio",
+        files={"audio_file": ("rec.m4a", io.BytesIO(b"fake audio"), "audio/mp4")},
+    )
+    assert response.status_code == 422
+
+
 # ------------------------------------------------------ 오류 응답이 프론트까지 읽히는가
 
 def test_error_details_are_utf8_json():

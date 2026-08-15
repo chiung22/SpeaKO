@@ -306,10 +306,30 @@ def _classify_word_category(word: str, is_different: bool, long_vowel_positions=
     return "표기-발음불일치"
 
 
+def _scripted_slides(project: "models.Project", only_scripted: bool = True):
+    return [s for s in project.slides if s.script] if only_scripted else project.slides
+
+
 def _compiled_script_text(project: "models.Project", only_scripted: bool = True) -> str:
-    """프로젝트의 슬라이드들을 "Slide N: 내용" 평문으로 이어붙인다."""
-    slides = [s for s in project.slides if s.script] if only_scripted else project.slides
-    return "\n".join(f"Slide {s.slide_number}: {s.script}" for s in slides)
+    """슬라이드들을 "Slide N: 내용" 평문으로 이어붙인다. **모델에 넘길 때만** 쓴다.
+
+    슬라이드 번호를 붙여두면 HCX가 "몇 번째 장 이야기인지" 알고 맥락을 잡는다.
+    ⚠️ 사람이 소리 내어 읽는 텍스트로는 쓰면 안 된다 — _plain_script_text를 쓸 것.
+    """
+    return "\n".join(f"Slide {s.slide_number}: {s.script}" for s in _scripted_slides(project, only_scripted))
+
+
+def _plain_script_text(project: "models.Project", only_scripted: bool = True) -> str:
+    """슬라이드 대본만 이어붙인다. **라벨 없이.** 발표자가 실제로 읽는 그대로다.
+
+    왜 따로 두나: 발음 평가의 기준 텍스트에 "Slide 1:"이 섞이면 Azure는 그것도 **읽어야 할
+    단어**로 센다. 발표자는 "슬라이드 일"이라고 말하지 않으니 전부 누락(Omission)으로 잡히고,
+    그 결과 (1) 완성도 점수가 실제보다 낮게 나오고 (2) 결과 화면의 원본 대본에 **"Slide 1"이
+    빨갛게 칠해진다**. 12장짜리 발표면 없는 오류가 24개 생기는 셈이다.
+    어려운 단어 분석도 같은 이유로 이쪽을 쓴다(라벨은 발표에서 읽는 말이 아니다).
+    """
+    scripts = [(s.script or "").strip() for s in _scripted_slides(project, only_scripted)]
+    return "\n".join(script for script in scripts if script)
 
 
 # ==========================================
@@ -855,7 +875,9 @@ async def extract_and_convert_words(request: AnalysisRequest, db: Session = Depe
     if not project:
         raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다.")
 
-    script_text = _compiled_script_text(project)
+    # 라벨 없는 순수 대본으로 분석한다. "Slide"·번호는 발표에서 읽는 말이 아니라
+    # 발음 주의 단어 후보가 될 수 없다.
+    script_text = _plain_script_text(project)
     if not script_text:
         raise HTTPException(status_code=422, detail="먼저 /api/script/full로 전체 대본을 생성해주세요.")
 
@@ -1019,7 +1041,16 @@ async def evaluate_pronunciation(
 
         project = db.get(models.Project, project_id)
         if not project:
-            raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다.")
+            # /api/script/full과 같은 이유로 진단 문구를 붙인다(그쪽 주석 참고). 이 엔드포인트가
+            # 특히 중요한 이유는, 스프링이 발표 생성 때 우리 project_id를 저장하지 못하면
+            # (실측 2026-08-15: ai_project_id가 전부 null) 그 사실이 **여기서 처음 드러나기**
+            # 때문이다. "프로젝트를 찾을 수 없습니다"만으로는 어느 쪽 ID를 보냈는지 알 수 없다.
+            print(f"⚠️ 404 발음 평가: project_id={project_id} 는 이 서버에 없습니다 "
+                  f"(POST /api/projects 응답 최상위의 project_id를 써야 함)")
+            raise HTTPException(status_code=404, detail=(
+                f"project_id={project_id} 프로젝트를 찾을 수 없습니다. "
+                "POST /api/projects 응답 **최상위**의 project_id를 사용하세요"
+                "(data 안이 아니며, snake_case입니다)."))
 
         # 슬라이드별 부분 녹음: slide_number를 주면 그 슬라이드 대본만 기준으로 채점한다.
         # (전체 대본을 기준으로 잡으면 한 장만 읽었을 때 완성도가 바닥으로 나온다)
@@ -1033,7 +1064,9 @@ async def evaluate_pronunciation(
                 raise HTTPException(status_code=422, detail="이 슬라이드에는 아직 생성된 대본이 없습니다.")
             text_to_evaluate = slide.script
         else:
-            text_to_evaluate = _compiled_script_text(project)
+            # 발표자가 실제로 읽는 텍스트여야 한다. "Slide 1:" 라벨이 섞이면 그것까지
+            # 읽어야 할 단어로 세어 없는 누락이 무더기로 생긴다(_plain_script_text 주석 참고).
+            text_to_evaluate = _plain_script_text(project)
 
         if not text_to_evaluate:
             raise HTTPException(status_code=422, detail="reference_text가 없고, 이 프로젝트에 생성된 대본도 없습니다.")
@@ -1254,6 +1287,11 @@ async def get_project(project_id: int, db: Session = Depends(get_db)):
                  "has_thumbnail": s.slide_number in _thumbnail_numbers}
                 for s in project.slides
             ],
+            # 슬라이드 대본을 순서대로 이어붙인 전체 대본('대본 확인' 화면이 그대로 그린다).
+            # 프론트/스프링이 각자 합치면 "Slide 1:" 같은 라벨을 붙이거나 순서가 어긋나기 쉽고,
+            # 그렇게 만든 텍스트를 평가 기준(reference_text)으로 되보내면 점수가 망가진다.
+            # 합치는 규칙은 한 곳에만 두는 편이 안전해서 서버가 만들어 내려준다.
+            "full_script": _plain_script_text(project),
             "difficult_words": [
                 {"word": w.word, "phoneme": w.phoneme, "category": w.category, "description": w.description}
                 for w in project.difficult_words

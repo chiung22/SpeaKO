@@ -1066,7 +1066,11 @@ def test_evaluation_saves_and_returns_recognized_text(monkeypatch, db_session_fa
     # 조회 API에서 원본 대본과 인식 텍스트를 나란히 받을 수 있어야 한다.
     detail = client.get(f"/api/projects/{project_id}").json()["data"]["evaluations"][0]
     assert detail["recognized_text"] == "메타버스를 소개함니다"
-    assert detail["reference_text"] == "Slide 1: 메타버스를 소개합니다."
+    # 2026-08-15까지는 "Slide 1: 메타버스를 소개합니다."였다. 라벨이 채점 기준에 섞이면
+    # Azure가 "Slide"와 번호도 읽어야 할 단어로 세서 없는 누락이 생기고, 결과 화면에서
+    # "Slide 1"이 빨갛게 칠해진다. 이제 발표자가 실제로 읽는 말만 기준으로 삼는다.
+    # (tests/test_reference_text_is_spoken.py 참고)
+    assert detail["reference_text"] == "메타버스를 소개합니다."
 
     listed = client.get("/api/evaluations").json()["data"][0]
     assert listed["recognized_text"] == "메타버스를 소개함니다"
