@@ -279,6 +279,18 @@ def _fallback_difficult_words(script_text: str, top_n: int = 6) -> list:
 
 
 DIFFICULT_WORD_CATEGORIES = ("장단음", "연음", "표기-발음불일치")
+
+# 카테고리의 영문 코드. 한국어 이름(`category`)은 화면에 그대로 뜨는 값이라 못 바꾸고, 스프링은
+# enum 상수로 받아야 해서(`HighlightCategory.valueOf(...)`) 둘 다 내려준다.
+#
+# 왜 필요한가: 스프링이 `valueOf(category.toUpperCase())`를 부르는데 "장단음"에는 대문자가
+# 없어 무조건 예외가 나고, 전부 기본값 한 가지로 떨어진다 — 세 카테고리 색이 같아진다(실측
+# 2026-08-16, 배포된 JAR 확인). 영문 코드를 같이 주면 그쪽은 필드 이름만 바꾸면 된다.
+DIFFICULT_WORD_CATEGORY_CODES = {
+    "장단음": "LENGTH",
+    "연음": "LIAISON",
+    "표기-발음불일치": "MISMATCH",
+}
 # 한 번의 /api/analysis/words 요청이 외부 사전 API를 무제한으로 때리지 않도록 상한.
 # (단어마다 표준국어대사전 조회가 들어가므로, 대본이 아주 길어도 앞쪽 N개까지만 분류한다)
 MAX_DIFFICULT_WORDS = 40
@@ -858,14 +870,66 @@ def _analyze_difficult_words(script_text: str):
         # 장단음으로 분류해놓고 어디를 길게 읽는지 안 알려주면 그 카테고리가 무의미하다.
         # 피그마 단어 목록도 `구성 › [구ː성]`처럼 위치를 보여준다.
         phoneme = phonology_rules.apply_length_marks(item["phoneme"], long_vowels)
+        description = phonology_rules.describe(word, phoneme, category, long_vowels)
         words_payload.append({
             **item,
             "phoneme": phoneme,
             "category": category,
-            "description": phonology_rules.describe(word, phoneme, category, long_vowels),
+            "category_code": DIFFICULT_WORD_CATEGORY_CODES[category],
+            # 대괄호·장음기호를 벗긴 읽는 그대로의 발음. 화면에 그냥 찍거나 TTS에 넣을 수 있다.
+            "standard_pronunciation": _clean_tts_text(phoneme),
+            "description": description,
+            # 스프링 PronunciationHighlight.ruleDesc와 이름을 맞춘 별칭(내용은 description과 같다).
+            "rule_desc": description,
         })
 
     return words_payload, summary
+
+
+def _word_occurrences(project: "models.Project", word: str) -> list:
+    """이 단어가 대본 어디에 나오는지 (슬라이드 번호 + 문자 오프셋) 전부 찾는다.
+
+    왜 저장하지 않고 매번 계산하나: 사용자가 대본을 고치면 저장해둔 좌표는 즉시 틀린 자리를
+    가리킨다. 평가 하이라이팅에서 이미 겪은 문제라(utils/error_highlights._checked_span),
+    같은 실수를 반복하지 않으려고 **읽는 시점의 대본**에서 그때그때 찾는다. 대본은 길어야
+    수천 자라 비용도 무시할 만하다.
+
+    오프셋은 **그 슬라이드 대본 문자열 기준**이다. 스프링이 하이라이트를 Script(슬라이드) 단위로
+    저장하므로 전체 대본 기준으로 주면 그쪽에서 다시 환산해야 한다.
+    """
+    if not word:
+        return []
+
+    occurrences = []
+    for slide in _scripted_slides(project):
+        script = slide.script or ""
+        start = script.find(word)
+        while start != -1:
+            occurrences.append({
+                "slide_number": slide.slide_number,
+                "position_start": start,
+                "position_end": start + len(word),
+            })
+            start = script.find(word, start + 1)
+    return occurrences
+
+
+def _difficult_words_payload(project: "models.Project") -> list:
+    """저장된 발음 주의 단어 + 현재 대본에서 찾은 위치. 조회 API들이 함께 쓴다."""
+    payload = []
+    for w in project.difficult_words:
+        category = w.category or ""
+        payload.append({
+            "word": w.word,
+            "phoneme": w.phoneme,
+            "standard_pronunciation": _clean_tts_text(w.phoneme or ""),
+            "category": category,
+            "category_code": DIFFICULT_WORD_CATEGORY_CODES.get(category),
+            "description": w.description,
+            "rule_desc": w.description,
+            "occurrences": _word_occurrences(project, w.word),
+        })
+    return payload
 
 
 @api.post("/api/analysis/words")
@@ -893,6 +957,12 @@ async def extract_and_convert_words(request: AnalysisRequest, db: Session = Depe
             category=item["category"], description=item.get("description"),
         ))
     db.commit()
+    db.refresh(project)
+
+    # 화면이 대본 위에 단어를 칠하려면 "어느 슬라이드 몇 번째 글자"가 필요하다.
+    # 분석은 이어붙인 전체 대본으로 하지만, 위치는 슬라이드별로 다시 찾아 준다.
+    for item in words_payload:
+        item["occurrences"] = _word_occurrences(project, item["word"])
 
     return {"success": True, "project_id": project.id, "data": {"words": words_payload, "summary": summary}}
 
@@ -1292,10 +1362,9 @@ async def get_project(project_id: int, db: Session = Depends(get_db)):
             # 그렇게 만든 텍스트를 평가 기준(reference_text)으로 되보내면 점수가 망가진다.
             # 합치는 규칙은 한 곳에만 두는 편이 안전해서 서버가 만들어 내려준다.
             "full_script": _plain_script_text(project),
-            "difficult_words": [
-                {"word": w.word, "phoneme": w.phoneme, "category": w.category, "description": w.description}
-                for w in project.difficult_words
-            ],
+            # word/phoneme/category/description은 그대로 두고(기존 프론트 호환),
+            # category_code·standard_pronunciation·rule_desc·occurrences를 덧붙인다.
+            "difficult_words": _difficult_words_payload(project),
             "evaluations": [
                 {
                     "id": e.id,
