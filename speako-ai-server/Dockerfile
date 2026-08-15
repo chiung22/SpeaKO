@@ -4,9 +4,19 @@
 # 16kHz 모노 PCM WAV로 변환하는 데 쓴다. 없으면 wav 외 모든 녹음 업로드가 502로 실패한다.
 FROM python:3.12-slim
 
-# ffmpeg: 오디오 변환용 / 나머지: kiwipiepy 등 일부 패키지가 소스 빌드될 때 필요
+# ffmpeg: 오디오 변환용 / build-essential: kiwipiepy 등 일부 패키지가 소스 빌드될 때 필요
+#
+# 썸네일용 3종 (편집 화면 왼쪽 슬라이드 미리보기):
+#   libreoffice-impress : PPTX → PDF 변환. 브라우저에서 PPTX를 그릴 방법이 없어 서버가 만든다.
+#                         impress만 넣는다(전체 libreoffice는 Writer/Calc까지 딸려와 수백 MB 더 커진다).
+#   poppler-utils       : PDF → 슬라이드별 PNG (pdftoppm)
+#   fonts-nanum         : ⚠️ 없으면 한글이 전부 두부(□□□)로 렌더링된다. 썸네일이 무의미해진다.
+#                         (fonts-nanum-coding은 현재 데비안에서 fonts-nanum에 통합돼 별도 설치 불가)
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg build-essential \
+    && apt-get install -y --no-install-recommends \
+        ffmpeg build-essential \
+        libreoffice-impress poppler-utils fonts-nanum \
+    && fc-cache -f \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

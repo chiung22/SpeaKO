@@ -45,7 +45,10 @@ def init_db():
 _EXPECTED_COLUMNS = {
     "pronunciation_evaluations": {
         "feedback": "JSON", "reference_text": "TEXT", "recognized_text": "TEXT",
-        "slide_number": "INTEGER",
+        "slide_number": "INTEGER", "speech_metrics": "JSON",
+    },
+    "projects": {
+        "thumbnail_status": "TEXT",
     },
     "difficult_words": {
         "description": "TEXT",

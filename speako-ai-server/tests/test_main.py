@@ -741,8 +741,8 @@ def test_evaluation_audio_returns_502_on_failure_and_does_not_save(monkeypatch, 
 
 def test_evaluation_audio_saves_history_on_success(monkeypatch, db_session_factory):
     project_id = _create_project(db_session_factory, [(1, "내용")], script_map={1: "테스트 문장입니다."})
-    # Azure는 소수 점수를 overall_scores 키로 준다. 백엔드는 0~5점으로 뭉개지 말고
-    # 소수 1자리(0~100)까지 자세히 내려줘야 한다(미세한 발음 차이가 드러나게).
+    # Azure는 소수 점수를 overall_scores 키로 준다. 백엔드는 0~100 정수로 반올림해서 내려준다
+    # (2026-08-15 변경: 화면이 `87점/100`을 그리는데 소수점은 자릿수가 흔들려 레이아웃이 밀린다).
     fake_result = {
         "status": "success",
         "overall_scores": {"accuracy": 90.44, "fluency": 85.66, "completeness": 80.0, "pronunciation_score": 88.75},
@@ -760,17 +760,17 @@ def test_evaluation_audio_saves_history_on_success(monkeypatch, db_session_facto
     body = response.json()
     assert body["evaluation_id"]
 
-    # 응답 점수는 소수 1자리로 자세히 내려줘야 한다(0~5점으로 압축 금지). 프론트는 그대로 표시만 한다.
+    # 응답 점수는 0~100 정수다. 프론트는 그대로 표시만 한다.
     scores = body["overall_scores"]
-    assert scores == {"accuracy": 90.4, "fluency": 85.7, "completeness": 80.0, "pronunciation_score": 88.8}
-    assert body["words_detail"][0]["accuracy_score"] == 72.7
+    assert scores == {"accuracy": 90, "fluency": 86, "completeness": 80, "pronunciation_score": 89}
+    assert body["words_detail"][0]["accuracy_score"] == 73
 
     db = db_session_factory()
     try:
         project = db.get(models.Project, project_id)
         assert len(project.evaluations) == 1
-        # DB에도 소수점 그대로 저장(키 불일치 버그 회귀 방지 — 예전엔 overall_scores를 못 읽어 None 저장됐음)
-        assert project.evaluations[0].accuracy_score == 90.4
+        # DB에도 그대로 저장(키 불일치 버그 회귀 방지 — 예전엔 overall_scores를 못 읽어 None 저장됐음)
+        assert project.evaluations[0].accuracy_score == 90
     finally:
         db.close()
 
@@ -929,7 +929,7 @@ def test_evaluation_feedback_generates_and_saves(monkeypatch, db_session_factory
 
     monkeypatch.setattr(
         main.feedback_generator, "generate_feedback",
-        lambda overall_scores, weak_words, script_excerpt="", strong_words=None: {
+        lambda overall_scores, weak_words, script_excerpt="", strong_words=None, deductions=None: {
             "summary": "전반적으로 또렷합니다.", "strengths": ["속도가 일정합니다."],
             "improvements": ["받침을 끝까지 발음하세요."], "practice_tips": ["천천히 3번 읽어보세요."],
         },
@@ -955,7 +955,8 @@ def test_evaluation_feedback_is_cached_and_not_regenerated(monkeypatch, db_sessi
 
     calls = []
 
-    def fake_generate(overall_scores, weak_words, script_excerpt="", strong_words=None):
+    def fake_generate(overall_scores, weak_words, script_excerpt="", strong_words=None,
+                      deductions=None):
         calls.append(1)
         return {"summary": "첫 생성", "strengths": [], "improvements": [], "practice_tips": []}
 
@@ -973,7 +974,7 @@ def test_evaluation_feedback_502_when_generation_fails(monkeypatch, db_session_f
     project_id = _create_project(db_session_factory, [(1, "내용")])
     evaluation_id = _create_evaluation(db_session_factory, project_id)
     monkeypatch.setattr(main.feedback_generator, "generate_feedback",
-                        lambda overall_scores, weak_words, script_excerpt="", strong_words=None: None)
+                        lambda overall_scores, weak_words, script_excerpt="", strong_words=None, deductions=None: None)
 
     assert client.post(f"/api/evaluation/{evaluation_id}/feedback").status_code == 502
 
@@ -986,7 +987,7 @@ def test_list_evaluations_returns_all_newest_first(db_session_factory):
     p1 = _create_project(db_session_factory, [(1, "A")])
     p2 = _create_project(db_session_factory, [(1, "B")])
     _add_evaluation(db_session_factory, p1, 70.5)
-    _add_evaluation(db_session_factory, p2, 85.3)
+    _add_evaluation(db_session_factory, p2, 85)
 
     response = client.get("/api/evaluations")
     assert response.status_code == 200
@@ -997,7 +998,7 @@ def test_list_evaluations_returns_all_newest_first(db_session_factory):
     # 각 항목은 어느 프로젝트인지(project_name)와 점수를 포함한다.
     sample = next(e for e in data if e["project_id"] == p2)
     assert sample["project_name"] == "테스트 프로젝트"
-    assert sample["accuracy_score"] == 85.3
+    assert sample["accuracy_score"] == 85
 
 
 # ── CORS (배포된 프론트엔드가 브라우저에서 직접 호출할 수 있어야 함) ──────────────
@@ -1065,7 +1066,11 @@ def test_evaluation_saves_and_returns_recognized_text(monkeypatch, db_session_fa
     # 조회 API에서 원본 대본과 인식 텍스트를 나란히 받을 수 있어야 한다.
     detail = client.get(f"/api/projects/{project_id}").json()["data"]["evaluations"][0]
     assert detail["recognized_text"] == "메타버스를 소개함니다"
-    assert detail["reference_text"] == "Slide 1: 메타버스를 소개합니다."
+    # 2026-08-15까지는 "Slide 1: 메타버스를 소개합니다."였다. 라벨이 채점 기준에 섞이면
+    # Azure가 "Slide"와 번호도 읽어야 할 단어로 세서 없는 누락이 생기고, 결과 화면에서
+    # "Slide 1"이 빨갛게 칠해진다. 이제 발표자가 실제로 읽는 말만 기준으로 삼는다.
+    # (tests/test_reference_text_is_spoken.py 참고)
+    assert detail["reference_text"] == "메타버스를 소개합니다."
 
     listed = client.get("/api/evaluations").json()["data"][0]
     assert listed["recognized_text"] == "메타버스를 소개함니다"

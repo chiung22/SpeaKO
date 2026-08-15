@@ -19,6 +19,7 @@ from concurrent.futures import ThreadPoolExecutor
 import uvicorn
 import os
 import re
+import shutil
 import uuid
 import hmac
 from urllib.parse import quote
@@ -47,7 +48,9 @@ from utils.text_heuristics import extract_frequent_terms
 from utils.stdict_client import StdictClient
 from utils.hangul_phonology import has_liaison_pattern
 from utils import phonology_rules
-from utils import score_grade
+from utils import speech_metrics
+from utils import error_highlights
+from utils import thumbnail_generator
 from utils import docx_builder
 from utils.body_limit import MaxBodySizeMiddleware
 from utils.rate_limit import RateLimitMiddleware
@@ -65,6 +68,11 @@ job_executor = ThreadPoolExecutor(
     thread_name_prefix="script-job",
 )
 job_session_factory = SessionLocal
+
+# 썸네일 변환(LibreOffice)은 한 번에 200~400MB를 잡는다. 배포된 t3.small(2GB)에서 두 개가
+# 동시에 돌면 스프링이나 MySQL이 OOM으로 죽으므로 **워커 1개**로 직렬화한다.
+# (thumbnail_generator 안에도 전역 락이 있어 이중으로 막는다)
+thumbnail_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="thumbnail")
 
 # 2. FastAPI 앱 인스턴스 생성
 app = FastAPI(
@@ -298,10 +306,30 @@ def _classify_word_category(word: str, is_different: bool, long_vowel_positions=
     return "표기-발음불일치"
 
 
+def _scripted_slides(project: "models.Project", only_scripted: bool = True):
+    return [s for s in project.slides if s.script] if only_scripted else project.slides
+
+
 def _compiled_script_text(project: "models.Project", only_scripted: bool = True) -> str:
-    """프로젝트의 슬라이드들을 "Slide N: 내용" 평문으로 이어붙인다."""
-    slides = [s for s in project.slides if s.script] if only_scripted else project.slides
-    return "\n".join(f"Slide {s.slide_number}: {s.script}" for s in slides)
+    """슬라이드들을 "Slide N: 내용" 평문으로 이어붙인다. **모델에 넘길 때만** 쓴다.
+
+    슬라이드 번호를 붙여두면 HCX가 "몇 번째 장 이야기인지" 알고 맥락을 잡는다.
+    ⚠️ 사람이 소리 내어 읽는 텍스트로는 쓰면 안 된다 — _plain_script_text를 쓸 것.
+    """
+    return "\n".join(f"Slide {s.slide_number}: {s.script}" for s in _scripted_slides(project, only_scripted))
+
+
+def _plain_script_text(project: "models.Project", only_scripted: bool = True) -> str:
+    """슬라이드 대본만 이어붙인다. **라벨 없이.** 발표자가 실제로 읽는 그대로다.
+
+    왜 따로 두나: 발음 평가의 기준 텍스트에 "Slide 1:"이 섞이면 Azure는 그것도 **읽어야 할
+    단어**로 센다. 발표자는 "슬라이드 일"이라고 말하지 않으니 전부 누락(Omission)으로 잡히고,
+    그 결과 (1) 완성도 점수가 실제보다 낮게 나오고 (2) 결과 화면의 원본 대본에 **"Slide 1"이
+    빨갛게 칠해진다**. 12장짜리 발표면 없는 오류가 24개 생기는 셈이다.
+    어려운 단어 분석도 같은 이유로 이쪽을 쓴다(라벨은 발표에서 읽는 말이 아니다).
+    """
+    scripts = [(s.script or "").strip() for s in _scripted_slides(project, only_scripted)]
+    return "\n".join(script for script in scripts if script)
 
 
 # ==========================================
@@ -364,62 +392,42 @@ class SlideCreateRequest(BaseModel):
     source_content: Optional[str] = Field("", max_length=MAX_SCRIPT_TEXT_LEN)
 
 
-def _attach_error_spans(words_detail, reference_text: str, recognized_text: str) -> None:
-    """단어마다 원본/인식 텍스트 안에서의 위치(문자 오프셋)를 붙인다. 리스트를 제자리에서 수정한다.
+def _int_score(value):
+    """점수를 0~100 정수로 정리한다. 값이 없으면 None.
 
-    왜 필요한가: 피그마 Feedback Page는 틀린 부분을 **원본과 인식 양쪽에** 강조한다.
-    `error_type`만으로는 같은 단어가 여러 번 나올 때 어느 것을 칠할지 정할 수 없다.
+    ⚠️ 한동안 소수 1자리(87.4)로 내려보냈다가 **정수로 되돌렸다**(2026-08-15, 사용자 지정).
+    화면이 `87점 / 100`으로 그리는데 소수점이 붙으면 자릿수가 흔들려 레이아웃이 밀리고,
+    발표 점수에서 0.4점 차이는 사용자에게 의미가 없다.
 
-    Azure는 단어를 발화 순서대로 돌려주므로, 각 텍스트를 커서로 훑으며 앞에서부터 맞춰간다.
-    - Omission(빠뜨림): 원본에만 있다 → recognized_span은 None
-    - Insertion(덧붙임): 실제로 말한 것뿐이다 → reference_span은 None
-    찾지 못하면(문장부호·정규화 차이 등) 억지로 맞추지 않고 None으로 둔다 — 엉뚱한 곳을
-    칠하느니 칠하지 않는 편이 낫다.
+    bool은 int의 하위 타입이라 따로 막는다(True가 1점이 되면 조용히 틀린다).
+    NaN/Inf는 int()가 터지므로 None으로 떨어뜨린다 — 점수 하나 때문에 평가가 500이 되면 안 된다.
     """
-    if not words_detail:
-        return
-
-    reference_text = reference_text or ""
-    recognized_text = recognized_text or ""
-    ref_cursor = 0
-    rec_cursor = 0
-
-    for entry in words_detail:
-        word = (entry.get("word") or "").strip()
-        error_type = entry.get("error_type")
-        entry["reference_span"] = None
-        entry["recognized_span"] = None
-        if not word:
-            continue
-
-        if error_type != "Insertion":
-            found = reference_text.find(word, ref_cursor)
-            if found != -1:
-                entry["reference_span"] = [found, found + len(word)]
-                ref_cursor = found + len(word)
-
-        if error_type != "Omission":
-            found = recognized_text.find(word, rec_cursor)
-            if found != -1:
-                entry["recognized_span"] = [found, found + len(word)]
-                rec_cursor = found + len(word)
+    if value is None or isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        return int(round(value))
+    except (ValueError, OverflowError):
+        return None
 
 
 def _round_scores_in_place(result: dict):
     """
-    발음 평가 점수를 소수 1자리(0~100)로 정리한다. 프론트는 이 숫자를 그대로 표시만 하므로
-    표시 형태를 백엔드에서 확정하는데, 0~5점 같은 거친 척도로 뭉개지 말고 소수점까지
-    자세히(예: 87.4) 내려줘서 미세한 발음 차이가 드러나게 한다.
-    전체 점수(overall_scores)와 단어별 정확도(words_detail)를 모두 처리.
+    발음 평가 점수를 0~100 **정수**로 정리한다. 프론트는 이 숫자를 그대로 표시만 하므로
+    표시 형태를 백엔드에서 확정한다.
+    전체 점수(overall_scores)와 단어별 정확도(words_detail)를 모두 처리한다 — 한 화면에
+    "종합 87"과 "구축의 55.5"가 같이 뜨면 어느 쪽이 기준인지 알 수 없다.
     """
     scores = result.get("overall_scores")
     if isinstance(scores, dict):
         for key, value in list(scores.items()):
-            if isinstance(value, (int, float)):
-                scores[key] = round(value, 1)
+            rounded = _int_score(value)
+            if rounded is not None:
+                scores[key] = rounded
     for word in result.get("words_detail") or []:
-        if isinstance(word, dict) and isinstance(word.get("accuracy_score"), (int, float)):
-            word["accuracy_score"] = round(word["accuracy_score"], 1)
+        if isinstance(word, dict):
+            rounded = _int_score(word.get("accuracy_score"))
+            if rounded is not None:
+                word["accuracy_score"] = rounded
 
 
 # ==========================================
@@ -433,8 +441,66 @@ api = APIRouter(dependencies=[Depends(verify_api_key)])
 async def root():
     return {"message": "SpeaKO AI 서버가 정상적으로 실행 중입니다!"}
 
+def _run_thumbnail_job(project_id, source_path):
+    """[백그라운드] 슬라이드 썸네일 생성 + 상태 기록.
+
+    업로드 응답을 붙잡지 않으려고 분리했다(27장 변환이 수십 초). 원본 임시 파일은 요청 쪽
+    finally에서 지워지므로, 여기 넘어온 사본을 다 쓰고 나서 직접 지운다.
+    실패해도 예외를 올리지 않는다 — 썸네일 때문에 업로드가 실패로 보이면 안 된다.
+    """
+    status, message = "failed", ""
+    try:
+        result = thumbnail_generator.generate_for_project(project_id, source_path)
+        status, message = result["status"], result["message"]
+        if status == "ready":
+            print(f"🖼️  썸네일 생성 완료: 프로젝트 {project_id}, {result['count']}장")
+        else:
+            print(f"⚠️ 썸네일 생성({project_id}) {status}: {message}")
+    except Exception as err:
+        print(f"❌ 썸네일 작업 중 예기치 못한 오류({project_id}): {err}")
+    finally:
+        if source_path and os.path.exists(source_path):
+            try:
+                os.remove(source_path)
+            except OSError:
+                pass
+
+    db = job_session_factory()
+    try:
+        project = db.get(models.Project, project_id)
+        if project:
+            project.thumbnail_status = status
+            db.commit()
+    except Exception as err:
+        print(f"❌ 썸네일 상태 기록 실패({project_id}): {err}")
+    finally:
+        db.close()
+
+
+def _queue_thumbnails(db: Session, project, upload_path: str, original_filename: str):
+    """업로드된 파일의 사본을 만들어 썸네일 생성을 백그라운드에 맡긴다."""
+    if not thumbnail_generator.is_available():
+        project.thumbnail_status = "unavailable"
+        db.commit()
+        return
+
+    try:
+        source_copy = _safe_temp_path(original_filename)
+        shutil.copyfile(upload_path, source_copy)
+    except OSError as err:
+        print(f"⚠️ 썸네일용 파일 복사 실패({project.id}): {err}")
+        project.thumbnail_status = "failed"
+        db.commit()
+        return
+
+    project.thumbnail_status = "pending"
+    db.commit()
+    thumbnail_executor.submit(_run_thumbnail_job, project.id, source_copy)
+
+
 def _create_project_from_script(db: Session, name: str, script: str):
-    project = models.Project(name=name, filename=None, topic=None, keywords=[])
+    # 대본만 올린 경우엔 그릴 슬라이드 원본이 없다. pending으로 두면 영영 안 끝난 것처럼 보인다.
+    project = models.Project(name=name, filename=None, topic=None, keywords=[], thumbnail_status="skipped")
     project.slides = [models.Slide(slide_number=1, source_content=script, script=script)]
     db.add(project)
     db.commit()
@@ -567,6 +633,10 @@ async def create_project(
             db.commit()
             db.refresh(project)
 
+            # 편집 화면 왼쪽의 슬라이드 미리보기용. 변환이 수십 초 걸려서 응답을 붙잡지 않는다.
+            _queue_thumbnails(db, project, temp_file_path, file.filename or "upload")
+
+            result["thumbnail_status"] = project.thumbnail_status
             return {"success": True, "project_id": project.id, "data": result}
         finally:
             if os.path.exists(temp_file_path):
@@ -805,7 +875,9 @@ async def extract_and_convert_words(request: AnalysisRequest, db: Session = Depe
     if not project:
         raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다.")
 
-    script_text = _compiled_script_text(project)
+    # 라벨 없는 순수 대본으로 분석한다. "Slide"·번호는 발표에서 읽는 말이 아니라
+    # 발음 주의 단어 후보가 될 수 없다.
+    script_text = _plain_script_text(project)
     if not script_text:
         raise HTTPException(status_code=422, detail="먼저 /api/script/full로 전체 대본을 생성해주세요.")
 
@@ -969,7 +1041,16 @@ async def evaluate_pronunciation(
 
         project = db.get(models.Project, project_id)
         if not project:
-            raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다.")
+            # /api/script/full과 같은 이유로 진단 문구를 붙인다(그쪽 주석 참고). 이 엔드포인트가
+            # 특히 중요한 이유는, 스프링이 발표 생성 때 우리 project_id를 저장하지 못하면
+            # (실측 2026-08-15: ai_project_id가 전부 null) 그 사실이 **여기서 처음 드러나기**
+            # 때문이다. "프로젝트를 찾을 수 없습니다"만으로는 어느 쪽 ID를 보냈는지 알 수 없다.
+            print(f"⚠️ 404 발음 평가: project_id={project_id} 는 이 서버에 없습니다 "
+                  f"(POST /api/projects 응답 최상위의 project_id를 써야 함)")
+            raise HTTPException(status_code=404, detail=(
+                f"project_id={project_id} 프로젝트를 찾을 수 없습니다. "
+                "POST /api/projects 응답 **최상위**의 project_id를 사용하세요"
+                "(data 안이 아니며, snake_case입니다)."))
 
         # 슬라이드별 부분 녹음: slide_number를 주면 그 슬라이드 대본만 기준으로 채점한다.
         # (전체 대본을 기준으로 잡으면 한 장만 읽었을 때 완성도가 바닥으로 나온다)
@@ -983,7 +1064,9 @@ async def evaluate_pronunciation(
                 raise HTTPException(status_code=422, detail="이 슬라이드에는 아직 생성된 대본이 없습니다.")
             text_to_evaluate = slide.script
         else:
-            text_to_evaluate = _compiled_script_text(project)
+            # 발표자가 실제로 읽는 텍스트여야 한다. "Slide 1:" 라벨이 섞이면 그것까지
+            # 읽어야 할 단어로 세어 없는 누락이 무더기로 생긴다(_plain_script_text 주석 참고).
+            text_to_evaluate = _plain_script_text(project)
 
         if not text_to_evaluate:
             raise HTTPException(status_code=422, detail="reference_text가 없고, 이 프로젝트에 생성된 대본도 없습니다.")
@@ -1012,7 +1095,12 @@ async def evaluate_pronunciation(
         _round_scores_in_place(result)
         # 틀린 부분을 원본·인식 양쪽에서 강조하려면(피그마 Feedback Page) 단어가 각 텍스트의
         # 어디에 있는지 알아야 한다. error_type만으로는 같은 단어가 여러 번 나올 때 못 고른다.
-        _attach_error_spans(result.get("words_detail"), text_to_evaluate, result.get("recognized_text"))
+        error_highlights.attach_spans(
+            result.get("words_detail"), text_to_evaluate, result.get("recognized_text")
+        )
+        # 간투어("음…", "어…")와 멈춤은 Azure 점수에 안 드러나지만 발표 코칭에서는 제일 자주
+        # 지적되는 부분이다. 단어 목록에서 따로 계산해 결과와 함께 저장한다.
+        metrics = speech_metrics.analyze(result.get("words_detail"))
         scores = result.get("overall_scores", {})
         evaluation = models.PronunciationEvaluation(
             project_id=project.id,
@@ -1026,6 +1114,7 @@ async def evaluate_pronunciation(
             recognized_text=result.get("recognized_text"),
             # 슬라이드별로 녹음했으면 몇 번 장이었는지 남긴다(전체 녹음이면 None).
             slide_number=slide_number,
+            speech_metrics=metrics,
         )
         db.add(evaluation)
         db.commit()
@@ -1038,10 +1127,20 @@ async def evaluate_pronunciation(
             # 프론트가 어느 텍스트에 대고 칠해야 할지 알 수 없다(대본을 이어붙이며 "Slide N:"
             # 접두어가 붙으므로 프론트가 가진 원본과 인덱스가 다르다).
             "reference_text": text_to_evaluate,
-            # 피그마 Feedback Page ㊶는 점수와 함께 등급(A~F)을 그린다. 프론트가 각자 변환하면
-            # 화면마다 기준이 달라질 수 있어서 서버가 한 곳에서 정한다(utils/score_grade.py).
-            "grades": score_grade.grades_for(result.get("overall_scores")),
             **result,
+            # **result 뒤에 둬서, 평가 모듈이 같은 키를 주더라도 여기서 계산한 값이 이긴다.
+            "speech_metrics": metrics,
+            # 결과 화면이 그대로 칠할 강조 목록. level이 "error"인 것만 빨간색이다
+            # (틀린 워딩 = 누락 + 대본에 없는 말. 발음 부정확은 warning으로 따로 나간다).
+            # 두 텍스트를 같이 넘겨서, 잘라낸 자리에 정말 그 단어가 있는지 확인하고 내보낸다.
+            "highlights": error_highlights.build_highlights(
+                result.get("words_detail"), text_to_evaluate, result.get("recognized_text")
+            ),
+            # 상세 피드백이 근거로 쓰는 감점 요인. HCX를 부르기 전에도 화면에 띄울 수 있도록
+            # 각 요인의 message를 서버가 문장으로 써서 내려준다.
+            "deductions": error_highlights.summarize_deductions(
+                result.get("words_detail"), result.get("overall_scores"), metrics
+            ),
         }
     except HTTPException:
         raise
@@ -1074,27 +1173,36 @@ async def create_evaluation_feedback(evaluation_id: int, db: Session = Depends(g
         # 지난 평가 화면만 깨지므로 읽을 때 새 형식으로 맞춰준다.
         cached = dict(evaluation.feedback)
         cached["practice_tips"] = normalize_practice_tips(cached.get("practice_tips"))
+        # 감점 요인을 넣기 전에 만들어진 피드백에는 이 키가 없다. 저장된 words_detail로 지금
+        # 계산해서 채운다(HCX를 다시 부르지 않는다 — 순수 계산이라 공짜다).
+        if not cached.get("deductions"):
+            cached["deductions"] = error_highlights.summarize_deductions(
+                evaluation.words_detail, _overall_scores(evaluation), evaluation.speech_metrics
+            )
         return {"success": True, "evaluation_id": evaluation.id, "data": cached, "cached": True}
 
-    overall_scores = {
-        "accuracy": evaluation.accuracy_score,
-        "fluency": evaluation.fluency_score,
-        "completeness": evaluation.completeness_score,
-        "pronunciation_score": evaluation.pronunciation_score,
-    }
+    overall_scores = _overall_scores(evaluation)
     weak_words = collect_weak_words(evaluation.words_detail)
     # 칭찬에도 근거가 필요하다 — 안 주면 모델이 대본에서 아무 단어나 골라 "잘 발음했다"고 지어낸다.
     strong_words = collect_strong_words(evaluation.words_detail)
     script_excerpt = _compiled_script_text(evaluation.project) if evaluation.project else ""
+    # 상세 피드백의 핵심 근거. 누락은 아예 안 읽은 단어라 weak_words에 없고, 간투어·멈춤은
+    # Azure 점수에 없다. 이걸 안 넘기면 완성도가 39점이어도 발음 얘기만 하는 피드백이 나온다.
+    deductions = error_highlights.summarize_deductions(
+        evaluation.words_detail, overall_scores, evaluation.speech_metrics
+    )
 
     feedback = await run_in_threadpool(
-        feedback_generator.generate_feedback, overall_scores, weak_words, script_excerpt, strong_words
+        feedback_generator.generate_feedback,
+        overall_scores, weak_words, script_excerpt, strong_words, deductions,
     )
     if not feedback:
         raise HTTPException(status_code=502, detail="발음 피드백 생성에 실패했습니다.")
 
     # 어떤 단어를 근거로 지적했는지 프론트가 함께 보여줄 수 있도록 같이 저장한다.
     feedback["weak_words"] = weak_words
+    # 감점 요인은 화면에 그대로 뜨는 값이라(각 factor.message가 완성된 문장이다) 함께 남긴다.
+    feedback["deductions"] = deductions
     evaluation.feedback = feedback
     db.commit()
     db.refresh(evaluation)
@@ -1113,6 +1221,7 @@ async def list_projects(db: Session = Depends(get_db)):
                 "name": p.name,
                 "topic": p.topic,
                 "slide_count": len(p.slides),
+                "thumbnail_status": p.thumbnail_status,
                 "created_at": p.created_at.isoformat(),
             }
             for p in projects
@@ -1136,12 +1245,14 @@ async def list_evaluations(db: Session = Depends(get_db)):
                 "project_id": e.project_id,
                 "project_name": e.project.name if e.project else None,
                 "slide_number": e.slide_number,  # 슬라이드별 녹음이면 그 번호, 전체 녹음이면 null
-                "accuracy_score": e.accuracy_score,
-                "fluency_score": e.fluency_score,
-                "completeness_score": e.completeness_score,
-                "pronunciation_score": e.pronunciation_score,
-                "grades": _evaluation_grades(e),  # A~F (피그마 Feedback Page)
+                **_evaluation_scores(e),  # 0~100 정수
                 "feedback": e.feedback,  # 아직 생성 안 했으면 null
+                "speech_metrics": e.speech_metrics,  # 간투어·멈춤·발화 속도
+                # 목록 화면엔 "누락 12 · 삽입 3"처럼 개수만 필요하다. 강조 위치(span)까지는
+                # 무거워서 안 싣는다 — 상세 화면(/api/projects/{id})에서 받아 간다.
+                "highlight_counts": error_highlights.build_highlights(
+                    e.words_detail, e.reference_text, e.recognized_text
+                )["counts"],
                 "reference_text": e.reference_text,   # 원본 대본
                 "recognized_text": e.recognized_text,  # Azure가 실제로 인식한 텍스트
                 "created_at": e.created_at.isoformat(),
@@ -1157,6 +1268,8 @@ async def get_project(project_id: int, db: Session = Depends(get_db)):
     if not project:
         raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다.")
 
+    _thumbnail_numbers = set(thumbnail_generator.available_slide_numbers(project.id))
+
     return {
         "success": True,
         "data": {
@@ -1166,10 +1279,19 @@ async def get_project(project_id: int, db: Session = Depends(get_db)):
             "topic": project.topic,
             "keywords": project.keywords,
             "created_at": project.created_at.isoformat(),
+            # 편집 화면 왼쪽 미리보기 목록. has_thumbnail이 true인 슬라이드만 이미지 요청을 보내면 된다
+            # (없는 걸 요청하면 404가 나고, 프론트는 깨진 이미지 아이콘을 그리게 된다).
+            "thumbnail_status": project.thumbnail_status,
             "slides": [
-                {"slide_number": s.slide_number, "source_content": s.source_content, "script": s.script}
+                {"slide_number": s.slide_number, "source_content": s.source_content, "script": s.script,
+                 "has_thumbnail": s.slide_number in _thumbnail_numbers}
                 for s in project.slides
             ],
+            # 슬라이드 대본을 순서대로 이어붙인 전체 대본('대본 확인' 화면이 그대로 그린다).
+            # 프론트/스프링이 각자 합치면 "Slide 1:" 같은 라벨을 붙이거나 순서가 어긋나기 쉽고,
+            # 그렇게 만든 텍스트를 평가 기준(reference_text)으로 되보내면 점수가 망가진다.
+            # 합치는 규칙은 한 곳에만 두는 편이 안전해서 서버가 만들어 내려준다.
+            "full_script": _plain_script_text(project),
             "difficult_words": [
                 {"word": w.word, "phoneme": w.phoneme, "category": w.category, "description": w.description}
                 for w in project.difficult_words
@@ -1178,15 +1300,17 @@ async def get_project(project_id: int, db: Session = Depends(get_db)):
                 {
                     "id": e.id,
                     "slide_number": e.slide_number,  # 슬라이드별 녹음이면 그 번호, 전체 녹음이면 null
-                    "accuracy_score": e.accuracy_score,
-                    "fluency_score": e.fluency_score,
-                    "completeness_score": e.completeness_score,
-                    "pronunciation_score": e.pronunciation_score,
-                    "grades": _evaluation_grades(e),  # A~F (피그마 Feedback Page)
+                    **_evaluation_scores(e),  # 0~100 정수
                     "feedback": e.feedback,  # 아직 생성 안 했으면 null
+                    "speech_metrics": e.speech_metrics,  # 간투어·멈춤·발화 속도
                     "reference_text": e.reference_text,   # 원본 대본
                     "recognized_text": e.recognized_text,  # Azure가 실제로 인식한 텍스트
                     "words_detail": e.words_detail,        # 단어별 점수(하이라이팅용)
+                    # 결과 화면이 그대로 칠할 강조 목록. level "error"만 빨간색이다.
+                    # span이 없는 예전 기록도 여기서 원본/인식 텍스트로 다시 맞춰준다.
+                    "highlights": error_highlights.build_highlights(
+                        e.words_detail, e.reference_text, e.recognized_text
+                    ),
                     "created_at": e.created_at.isoformat(),
                 }
                 for e in project.evaluations
@@ -1204,7 +1328,33 @@ async def delete_project(project_id: int, db: Session = Depends(get_db)):
 
     db.delete(project)
     db.commit()
+    # 썸네일은 DB가 아니라 디스크에 있어서 cascade로 안 지워진다. 안 지우면 계속 쌓인다.
+    thumbnail_generator.clear_project(project_id)
     return {"success": True, "deleted_project_id": project_id}
+
+
+@api.get("/api/projects/{project_id}/slides/{slide_number}/thumbnail")
+async def get_slide_thumbnail(project_id: int, slide_number: int, db: Session = Depends(get_db)):
+    """[슬라이드 미리보기 이미지] 편집 화면 왼쪽 목록에 그릴 PNG를 그대로 돌려준다.
+
+    아직 생성 중이거나(pending) 변환에 실패한 슬라이드는 404다. 프로젝트 조회 응답의
+    `slides[].has_thumbnail`을 보고 있는 것만 요청하면 깨진 이미지가 안 뜬다."""
+    project = db.get(models.Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다.")
+
+    path = thumbnail_generator.thumbnail_path(project_id, slide_number)
+    if not path:
+        raise HTTPException(
+            status_code=404,
+            detail=f"이 슬라이드의 미리보기가 없습니다. (생성 상태: {project.thumbnail_status or 'unknown'})",
+        )
+
+    with open(path, "rb") as image_file:
+        content = image_file.read()
+    # 한 번 만든 썸네일은 바뀌지 않으므로 브라우저가 오래 캐시하게 둔다.
+    return Response(content=content, media_type="image/png",
+                    headers={"Cache-Control": "public, max-age=86400"})
 
 
 @api.put("/api/projects/{project_id}")
@@ -1286,18 +1436,32 @@ async def download_highlighted_script_docx(project_id: int, db: Session = Depend
     return _docx_response(content, f"하이라이팅_{project.name}.docx")
 
 
-def _evaluation_grades(evaluation) -> dict:
-    """저장된 평가 행 → 등급 dict(피그마 Feedback Page ㊶).
+def _overall_scores(evaluation) -> dict:
+    """저장된 평가 행 → 피드백·감점 요인이 쓰는 키 이름(`accuracy` …)의 정수 점수 dict.
 
-    이력 조회 응답은 스키마가 flat이라(accuracy_score …) 키 이름이 평가 직후 응답과 다르다.
-    등급 기준은 한 곳(utils/score_grade.py)에만 두려고 여기서 이름만 맞춰 넘긴다.
+    이력 조회 응답은 스키마가 flat이라(`accuracy_score` …) 키 이름이 다르다. 두 이름을
+    한 곳에서만 갈아끼우려고 분리했다.
     """
-    return score_grade.grades_for({
-        "accuracy": evaluation.accuracy_score,
-        "fluency": evaluation.fluency_score,
-        "completeness": evaluation.completeness_score,
-        "pronunciation_score": evaluation.pronunciation_score,
-    })
+    return {
+        "accuracy": _int_score(evaluation.accuracy_score),
+        "fluency": _int_score(evaluation.fluency_score),
+        "completeness": _int_score(evaluation.completeness_score),
+        "pronunciation_score": _int_score(evaluation.pronunciation_score),
+    }
+
+
+def _evaluation_scores(evaluation) -> dict:
+    """저장된 평가 행 → 0~100 정수 점수 dict.
+
+    저장된 값을 그대로 쓰지 않고 한 번 더 거르는 이유: 정수로 바꾸기 전(2026-08-15 이전)에
+    저장된 행들은 소수(87.4)로 남아 있다. 옛 기록만 소수로 보이면 안 된다.
+    """
+    return {
+        "accuracy_score": _int_score(evaluation.accuracy_score),
+        "fluency_score": _int_score(evaluation.fluency_score),
+        "completeness_score": _int_score(evaluation.completeness_score),
+        "pronunciation_score": _int_score(evaluation.pronunciation_score),
+    }
 
 
 def _slides_payload(project: "models.Project") -> list:

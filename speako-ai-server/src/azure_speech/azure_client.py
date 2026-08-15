@@ -1,3 +1,4 @@
+import json
 import os
 import threading
 import wave
@@ -5,6 +6,7 @@ import azure.cognitiveservices.speech as speechsdk
 from dotenv import load_dotenv
 
 from utils.usage_tracker import log_azure_speech_call
+from utils.speech_metrics import TICKS_PER_SECOND
 
 # .env 파일 로드
 load_dotenv()
@@ -26,6 +28,54 @@ def _get_wav_duration_seconds(path: str) -> float:
             return wf.getnframes() / float(rate) if rate else 0.0
     except Exception:
         return 0.0
+
+
+def _word_timings(result):
+    """인식 결과의 상세 JSON에서 단어별 시작·길이를 초 단위로 뽑는다.
+
+    SDK의 `PronunciationAssessmentResult.words`에는 점수만 있고 시각이 없어서, 멈춤을 재려면
+    원본 응답(NBest[0].Words)을 직접 봐야 한다. Offset/Duration은 100ns 틱이고 오디오 시작
+    기준의 절대값이라, 연속 인식으로 조각이 여러 개 와도 그대로 이어 붙여 쓸 수 있다.
+
+    포맷이 바뀌거나 필드가 없어도 평가 자체는 계속돼야 하므로, 실패하면 빈 dict를 준다
+    (멈춤만 '계산 불가'로 표시되고 점수는 정상 반환된다).
+    """
+    try:
+        raw = result.json
+    except Exception:
+        raw = None
+    if not raw:
+        try:
+            raw = result.properties.get(speechsdk.PropertyId.SpeechServiceResponse_JsonResult)
+        except Exception:
+            raw = None
+    if not raw:
+        return {}
+
+    try:
+        payload = json.loads(raw)
+        nbest = payload.get("NBest") or []
+        words = (nbest[0].get("Words") if nbest else None) or []
+    except (ValueError, AttributeError, IndexError, TypeError):
+        return {}
+
+    timings = {}
+    for position, word in enumerate(words):
+        if not isinstance(word, dict):
+            continue
+        offset = word.get("Offset")
+        duration = word.get("Duration")
+        # 대본에 있으나 말하지 않은 단어(Omission)는 길이가 0으로 온다. 시간축에 넣으면
+        # 0초 지점에 단어가 있는 것처럼 보여 멈춤 계산이 망가지므로 뺀다.
+        if not isinstance(offset, (int, float)) or not isinstance(duration, (int, float)):
+            continue
+        if offset < 0 or duration <= 0:
+            continue
+        timings[position] = {
+            "offset_seconds": round(offset / TICKS_PER_SECOND, 3),
+            "duration_seconds": round(duration / TICKS_PER_SECOND, 3),
+        }
+    return timings
 
 
 class PronunciationEvaluator:
@@ -89,12 +139,17 @@ class PronunciationEvaluator:
                 if evt.result.reason == speechsdk.ResultReason.RecognizedSpeech and evt.result.text:
                     recognized_segments.append(evt.result.text)
                     pron_result = speechsdk.PronunciationAssessmentResult(evt.result)
-                    for word in pron_result.words:
-                        words_data.append({
+                    # 단어별 시각은 SDK의 PronunciationAssessmentResult에 없고 상세 JSON에만 있다.
+                    # 이게 있어야 멈춤(pause)을 잴 수 있으므로 원본 응답에서 같이 꺼낸다.
+                    timings = _word_timings(evt.result)
+                    for position, word in enumerate(pron_result.words):
+                        entry = {
                             "word": word.word,
                             "accuracy_score": word.accuracy_score,
                             "error_type": word.error_type
-                        })
+                        }
+                        entry.update(timings.get(position, {}))
+                        words_data.append(entry)
                     segment_scores.append({
                         "accuracy": pron_result.accuracy_score,
                         "fluency": pron_result.fluency_score,
@@ -169,7 +224,11 @@ class PronunciationEvaluator:
             return {"status": "error", "message": f"평가 중 오류 발생: {str(e)}"}
 
     def _mock_evaluation(self):
-        """안전 모드(Fallback): API 키가 없을 때 반환하는 가짜 테스트 데이터"""
+        """안전 모드(Fallback): API 키가 없을 때 반환하는 가짜 테스트 데이터.
+
+        간투어 '음'(대본에 없으므로 Insertion)과 1.1초짜리 멈춤을 일부러 하나씩 넣어 뒀다.
+        Azure 키 없이 서버를 띄워도 프론트가 발표 습관 지표 화면을 그려볼 수 있어야 한다.
+        """
         import time
         time.sleep(1.5) # 실제 네트워크 호출처럼 약간의 딜레이
 
@@ -181,13 +240,21 @@ class PronunciationEvaluator:
                 "completeness": 100.0,
                 "pronunciation_score": 88.5
             },
-            "recognized_text": "메타버스와 인프라 구축의 특징을 살펴봅시다.",
+            "recognized_text": "메타버스와 인프라 음 구축의 특징을 살펴봅시다.",
             "words_detail": [
-                {"word": "메타버스와", "accuracy_score": 95.0, "error_type": "None"},
-                {"word": "인프라", "accuracy_score": 98.0, "error_type": "None"},
-                {"word": "구축의", "accuracy_score": 60.0, "error_type": "Mispronunciation"},
-                {"word": "특징을", "accuracy_score": 50.0, "error_type": "Mispronunciation"},
-                {"word": "살펴봅시다.", "accuracy_score": 92.0, "error_type": "None"}
+                {"word": "메타버스와", "accuracy_score": 95.0, "error_type": "None",
+                 "offset_seconds": 0.5, "duration_seconds": 0.7},
+                {"word": "인프라", "accuracy_score": 98.0, "error_type": "None",
+                 "offset_seconds": 1.4, "duration_seconds": 0.6},
+                {"word": "음", "accuracy_score": 0.0, "error_type": "Insertion",
+                 "offset_seconds": 2.1, "duration_seconds": 0.3},
+                # 여기서 1.1초 비어 있다 → 멈춤 1회
+                {"word": "구축의", "accuracy_score": 60.0, "error_type": "Mispronunciation",
+                 "offset_seconds": 3.5, "duration_seconds": 0.6},
+                {"word": "특징을", "accuracy_score": 50.0, "error_type": "Mispronunciation",
+                 "offset_seconds": 4.3, "duration_seconds": 0.6},
+                {"word": "살펴봅시다.", "accuracy_score": 92.0, "error_type": "None",
+                 "offset_seconds": 5.0, "duration_seconds": 0.9}
             ]
         }
 

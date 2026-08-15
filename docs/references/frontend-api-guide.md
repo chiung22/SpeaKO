@@ -369,34 +369,63 @@ new Audio(URL.createObjectURL(await res.blob())).play();
 ```json
 { "success": true, "project_id": 12, "evaluation_id": 5,
   "slide_number": 3,
-  "overall_scores": { "accuracy": 87.4, "fluency": 82.1,
-                      "completeness": 95.0, "pronunciation_score": 84.3 },
-  "grades":         { "accuracy": "B",  "fluency": "B",
-                      "completeness": "A", "pronunciation_score": "B" },
+  "overall_scores": { "accuracy": 87, "fluency": 82,
+                      "completeness": 95, "pronunciation_score": 84 },
   "reference_text": "Slide 1: 안녕하세요 ...",
   "recognized_text": "실제로 인식된 문장",
-  "words_detail": [{ "word": "발전", "accuracy_score": 52.0, "error_type": "Mispronunciation",
-                     "reference_span": [12, 14], "recognized_span": [10, 12] }] }
+  "words_detail": [{ "word": "발전", "accuracy_score": 52, "error_type": "Mispronunciation",
+                     "reference_span": [12, 14], "recognized_span": [10, 12] }],
+  "highlights": { "reference": [], "recognized": [],
+                  "counts": { "omission": 0, "insertion": 0, "mispronunciation": 1, "error": 0 },
+                  "has_errors": false },
+  "deductions": { "factors": [], "counts": {}, "scores": {}, "primary": null } }
 ```
 - ⚠️ 응답은 **`data`로 감싸지 않고 평평하게** 내려옵니다. (AI 피드백 API만 `data`로 감쌉니다)
-- 좌우 대조 화면의 하이라이트는 `reference_span` / `recognized_span`으로 칠합니다 — 자세한 규칙은 위 [3. 발음 주의 단어](#3-발음-주의-단어-post-apianalysiswords) 항목과 동일합니다. 오프셋 기준은 **응답의 `reference_text`**입니다.
-- 🔴 **화면에는 등급(`grades`)만 표기합니다.** 숫자 점수는 화면에 쓰지 마세요 (제품 결정, 2026-08-09).
-  - 예외는 종합 점수의 **원형 게이지 하나**입니다. 게이지 호(arc)를 몇 % 채울지 계산하려면 0~100 숫자가 필요해서 `pronunciation_score`를 씁니다. **게이지 안에 적는 글자는 등급**이고, 숫자는 채우는 비율 계산에만 쓰세요.
-- 점수는 **소수 1자리(0~100)**로 계속 내려갑니다. 위 게이지 계산과 기록 보관용입니다.
-- **`grades`** — 같은 점수를 A~F로 환산한 값입니다(피그마 Feedback Page ㊶). 기준은 서버가 한 곳에서 정합니다:
-
-  | 등급 | 점수 |
-  |---|---|
-  | A | 90 이상 |
-  | B | 80 이상 |
-  | C | 70 이상 |
-  | D | 60 이상 |
-  | F | 60 미만 |
-
-  `GET /api/evaluations`와 `GET /api/projects/{id}`의 평가 이력에도 같은 `grades`가 들어 있습니다. 코칭 내역 목록도 등급으로 표기하세요.
+- 🔴 **점수는 0~100 정수입니다. 화면에 그대로 쓰세요** (2026-08-15 변경).
+  - 이전에는 등급(A~F)만 표기하고 숫자를 감췄는데, **`grades` 필드는 없어졌습니다.** 옛 코드가 `grades`를 읽고 있으면 `undefined`가 됩니다.
+  - 소수점도 없어졌습니다. `87.4`가 아니라 `87`입니다 — `toFixed()`로 자르던 코드가 있으면 지우세요.
+  - 원형 게이지 호(arc)의 채움 비율은 그대로 `pronunciation_score / 100`으로 계산하면 됩니다.
+- 좌우 대조 화면의 하이라이트는 **`highlights`를 쓰세요.** `words_detail`로 직접 계산하지 않아도 됩니다 — 서버가 어디를 무슨 색으로 칠할지 정해서 내려줍니다. 자세한 내용은 아래 [4-1. 결과창 하이라이팅](#4-1-결과창-하이라이팅) 참고.
 - `recognized_text`와 원본 대본을 좌우로 놓으면 "원본 ↔ 인식 텍스트" 비교 화면이 됩니다.
-- `error_type`: `None`(정상) / `Mispronunciation`(틀림) / `Omission`(안 읽음).
+- `error_type`: `None`(정상) / `Mispronunciation`(발음이 흐림) / `Omission`(안 읽음) / `Insertion`(대본에 없는 말).
 - 중간에 멈춰도 **읽은 부분까지만** 채점됩니다. 어디까지 읽었는지 알려줄 필요 없습니다.
+
+---
+
+## 4-1. 결과창 하이라이팅
+
+**틀린 워딩은 빨간색입니다.** 어디를 무슨 색으로 칠할지는 서버가 정해서 `highlights`로 내려줍니다. `error_type`을 보고 프론트에서 규칙을 다시 세우지 마세요 — 화면마다 기준이 달라집니다.
+
+```json
+"highlights": {
+  "reference":  [ { "word": "인프라", "start": 12, "end": 15, "type": "omission",
+                    "level": "error", "reason": "대본에 있지만 말하지 않았습니다.",
+                    "accuracy_score": 0 } ],
+  "recognized": [ { "word": "음", "start": 6, "end": 7, "type": "insertion",
+                    "level": "error", "reason": "대본에 없는 말을 했습니다.",
+                    "accuracy_score": 0 } ],
+  "counts": { "omission": 5, "insertion": 1, "mispronunciation": 2, "error": 6 },
+  "has_errors": true
+}
+```
+
+**`level`이 `"error"`인 것만 빨간색으로 칠하세요.**
+
+| `type` | 뜻 | `level` | 색 |
+|---|---|---|---|
+| `omission` | 대본에 있는데 안 읽음 | `error` | 🔴 빨강 |
+| `insertion` | 대본에 없는데 말함 | `error` | 🔴 빨강 |
+| `mispronunciation` | 읽긴 했는데 발음이 흐림 | `warning` | 빨강 아님 (주황/밑줄 등) |
+
+발음이 흐린 건 **단어를 틀리게 읽은 게 아닙니다.** 같은 빨강으로 칠하면 "대본을 틀리게 읽었다"는 잘못된 인상을 줍니다.
+
+- `reference`는 **원본 대본**에, `recognized`는 **인식 텍스트**에 칠합니다. 누락은 원본에만, 삽입은 인식 쪽에만 나옵니다(당연히 — 안 읽은 말은 인식 텍스트에 없습니다).
+- `start`/`end`는 **응답의 `reference_text` / `recognized_text` 기준** 문자 오프셋입니다. 대본을 이어붙일 때 `"Slide N:"` 접두어가 붙으므로, 따로 들고 있는 원본 문자열로 자르면 엉뚱한 글자가 빨개집니다.
+- 이미 위치순으로 정렬돼 있습니다. 그대로 순회하면서 칠하면 됩니다.
+- 위치를 확신할 수 없는 단어는 목록에서 빠집니다(엉뚱한 곳을 칠하느니 안 칠합니다). 그래서 **`counts`와 목록 길이가 다를 수 있습니다** — 뱃지 숫자는 `counts`를, 칠할 자리는 목록을 쓰세요.
+- `reason`은 완성된 문장이라 툴팁에 그대로 넣으면 됩니다.
+
+`GET /api/projects/{id}`의 평가 이력에도 같은 `highlights`가 들어 있어서, 지난 평가를 다시 열어도 같은 자리가 빨개집니다. `GET /api/evaluations`(코칭 내역 목록)에는 개수만(`highlight_counts`) 들어갑니다.
 
 ---
 
@@ -409,11 +438,37 @@ new Audio(URL.createObjectURL(await res.blob())).play();
     "strengths": ["'평가'를 정확하게 발음하셨습니다."],
     "improvements": ["'발전'의 받침을 끝까지 발음하세요."],
     "practice_tips": ["거울을 보며 입 모양을 확인하세요."],
-    "weak_words": [{ "word": "발전", "accuracy_score": 52.0, "error_type": "Mispronunciation" }]
+    "weak_words": [{ "word": "발전", "accuracy_score": 52, "error_type": "Mispronunciation" }],
+    "deductions": { "...": "아래 참고" }
   } }
 ```
 - 생성에 몇 초 걸립니다. 스피너를 띄워주세요.
 - **이미 만든 피드백이 있으면 재생성하지 않고 그대로 반환**합니다(`cached: true`). 여러 번 눌러도 비용이 늘지 않습니다.
+
+### 감점 요인 (`deductions`) — 상세 피드백 화면
+
+"무엇 때문에 깎였는가"입니다. `/api/evaluation/audio` 응답에도 같이 들어 있어서, **피드백을 부르기 전에도 그릴 수 있습니다.**
+
+```json
+"deductions": {
+  "factors": [
+    { "key": "omission", "label": "대본 누락", "count": 5, "ratio_percent": 55.6,
+      "affects": ["completeness"], "severity": "high",
+      "examples": ["인프라", "첫째로", "확장성이"],
+      "message": "대본에 있는 단어 5개를 읽지 않았습니다(대본의 55.6%). 완성도 점수가 그만큼 내려갑니다." }
+  ],
+  "counts": { "omission": 5, "insertion": 1, "mispronunciation": 2, "filler": 1, "pause": 1 },
+  "scores": { "accuracy": 72, "fluency": 64, "completeness": 40, "pronunciation_score": 58 },
+  "primary": "omission"
+}
+```
+
+- `factors`는 **심각한 순으로 정렬**돼 있습니다. 위에서부터 그리면 제일 큰 원인이 먼저 보입니다.
+- `message`는 **완성된 문장**입니다. 그대로 카드에 넣으세요. AI 피드백을 안 불렀거나 실패해도 이건 항상 나옵니다.
+- `key`: `omission` / `insertion` / `mispronunciation` / `filler` / `pause` / `speech_rate` 여섯 가지. 아이콘 고를 때 쓰세요.
+- `severity`: `high` / `medium` / `low`. 카드 강조에 쓰세요.
+- ⚠️ **요인별로 몇 점 깎였는지는 안 내려갑니다.** Azure가 공개하지 않는 값이라 지어낼 수 없습니다. "누락 −12점"처럼 쓰지 마시고, `affects`가 가리키는 점수를 `scores`에서 꺼내 **"완성도 40 — 대본 누락 5개 때문입니다"** 형태로 이으세요.
+- `speech_rate`는 개수로 셀 수 있는 요인이 아니라 `count`가 `0`입니다. 이 항목만 개수를 표시하지 마세요.
 
 ---
 

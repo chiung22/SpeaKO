@@ -51,7 +51,10 @@ def collect_weak_words(words_detail, threshold=WEAK_WORD_THRESHOLD, limit=MAX_WE
         score = word.get("accuracy_score")
         error_type = (word.get("error_type") or "").strip()
         # 누락(Omission)은 '발음이 나쁜 것'이 아니라 안 읽은 것이므로 발음 지적 대상에서 뺀다.
-        if error_type == "Omission":
+        # 삽입(Insertion)도 마찬가지다. 대본에 없는 말이라 맞춰볼 기준이 없어서 Azure가 정확도를
+        # 0으로 주는데, 그대로 두면 간투어 '음'이 "정확도 0점 단어"로 올라가 모델이
+        # "'음'을 또박또박 발음하세요"라고 쓴다(실측). 둘 다 감점 요인으로 따로 전달한다.
+        if error_type in ("Omission", "Insertion"):
             continue
         is_weak = (isinstance(score, (int, float)) and score < threshold) or error_type == "Mispronunciation"
         if is_weak and word.get("word"):
@@ -77,6 +80,25 @@ def collect_strong_words(words_detail, threshold=STRONG_WORD_THRESHOLD, limit=MA
 
     strong.sort(key=lambda w: w["accuracy_score"], reverse=True)
     return strong[:limit]
+
+
+def _deduction_lines(deductions):
+    """감점 요인을 프롬프트에 넣을 몇 줄로 편다.
+
+    message는 이미 서버가 사실만으로 써 놓은 문장이라 그대로 넘긴다. 예시 단어를 함께 주는
+    이유는 모델이 지적을 구체적으로 쓸 수 있게 하기 위해서다 — 근거 없이 단어를 고르면
+    안 되므로 여기 적힌 단어만 쓰라고 [작성 규칙] 2번이 못 박고 있다.
+    """
+    factors = (deductions or {}).get("factors") or []
+    if not factors:
+        return "- 뚜렷한 감점 요인이 관찰되지 않았습니다."
+
+    lines = []
+    for factor in factors:
+        examples = factor.get("examples") or []
+        example_text = f" (예: {', '.join(examples)})" if examples else ""
+        lines.append(f"- [{factor.get('label')}] {factor.get('message')}{example_text}")
+    return "\n        ".join(lines)
 
 
 def parse_feedback_sections(text):
@@ -297,7 +319,12 @@ class PronunciationFeedbackGenerator:
         2. 지적도 칭찬도 반드시 아래에 주어진 단어 목록만 근거로 삼으세요.
            목록에 없는 단어를 골라 "잘 발음했습니다"라고 하거나 지적하지 마세요.
            대본은 맥락 파악용일 뿐이며, 대본에서 단어를 골라 평가하면 안 됩니다.
-        3. ⚠️ **가장 중요합니다 — 우리는 "어느 단어가 몇 점인지"만 압니다.**
+        3. **[감점 요인]이 주어지면 그것을 개선할 점의 첫 번째 근거로 삼으세요.**
+           사용자가 가장 알고 싶은 것은 "왜 깎였는가"입니다. 개수는 주어진 값을 그대로 쓰고,
+           **몇 점 깎였는지는 쓰지 마세요** — 요인별 감점 폭은 측정되지 않습니다.
+             ✓ "대본에 있는 단어 12개를 읽지 않아 완성도가 낮았습니다. 끝까지 읽어보세요."
+             ✗ "누락으로 12점이 감점되었습니다"   ← 감점 폭은 알 수 없음
+        4. ⚠️ **가장 중요합니다 — 우리는 "어느 단어가 몇 점인지"만 압니다.**
            그 단어를 **어떻게** 잘못 발음했는지는 측정되지 않았습니다. 그러므로 특정 단어를
            지목하면서 원인을 단정하지 마세요. 아래는 전부 **금지**입니다.
              ✗ "'유연한'에서 받침을 생략했습니다"      ← 받침을 생략했는지 알 수 없음
@@ -306,8 +333,8 @@ class PronunciationFeedbackGenerator:
            대신 **관찰된 사실 + 행동**으로 쓰세요.
              ✓ "'유연한', '마음으로'가 낮은 정확도를 받았습니다. 한 음절씩 또박또박 읽어보세요."
              ✓ "'언제든지'는 특히 낮았습니다(28점). 천천히 반복해서 연습해보세요."
-        4. 격려하되 과장하지 마세요. 점수가 낮으면 낮다고 정직하게 말하세요.
-        5. 존댓말(~습니다/~하세요)로 쓰고, 각 항목은 한 문장으로 간결하게 쓰세요.
+        5. 격려하되 과장하지 마세요. 점수가 낮으면 낮다고 정직하게 말하세요.
+        6. 존댓말(~습니다/~하세요)로 쓰고, 각 항목은 한 문장으로 간결하게 쓰세요.
 
         출력은 아래 네 개의 머리말을 그대로 쓰고, 그 아래에 내용을 적으세요. 다른 머리말이나 해설은 덧붙이지 마세요.
 
@@ -331,16 +358,22 @@ class PronunciationFeedbackGenerator:
         예) consonant | 명확한 자음 발음 | 'ㄷ, ㅈ, ㅅ' 계열 자음을 더 또렷하게 발음해보세요.
         """
 
-    def generate_feedback(self, overall_scores, weak_words, script_excerpt="", strong_words=None):
+    def generate_feedback(self, overall_scores, weak_words, script_excerpt="", strong_words=None,
+                          deductions=None):
         """
         점수와 단어별 결과를 근거로 코칭 피드백을 생성한다.
         성공하면 {"summary", "strengths", "improvements", "practice_tips"} dict, 실패하면 None.
+
+        deductions는 utils/error_highlights.summarize_deductions()의 결과다. 누락·삽입·간투어·
+        멈춤처럼 "낮은 점수를 받은 단어" 목록만으로는 안 보이는 감점 요인을 모델에 알려준다.
+        (누락은 단어를 아예 안 읽은 것이라 weak_words에 없고, 삽입은 정확도 0으로 와서
+        빼놨다. 이걸 안 넘기면 완성도 39점짜리 녹음에도 발음 얘기만 하는 피드백이 나온다.)
         """
         if self.use_fallback:
             return None
 
         user_prompt = self._build_user_prompt(
-            overall_scores or {}, weak_words or [], script_excerpt, strong_words or []
+            overall_scores or {}, weak_words or [], script_excerpt, strong_words or [], deductions
         )
 
         headers = {
@@ -377,7 +410,8 @@ class PronunciationFeedbackGenerator:
             print(f"❌ 발음 피드백 생성 API 호출 중 에러가 발생했습니다: {e}")
             return None
 
-    def _build_user_prompt(self, overall_scores, weak_words, script_excerpt, strong_words=()):
+    def _build_user_prompt(self, overall_scores, weak_words, script_excerpt, strong_words=(),
+                           deductions=None):
         def score_line(label, key):
             value = overall_scores.get(key)
             return f"- {label}: {value if value is not None else '측정 안 됨'}"
@@ -405,6 +439,9 @@ class PronunciationFeedbackGenerator:
         {score_line('유창성', 'fluency')}
         {score_line('완성도', 'completeness')}
         {score_line('종합 발음 점수', 'pronunciation_score')}
+
+        [감점 요인] — 심각한 순. 개선할 점의 **첫 번째 근거**로 쓰세요
+        {_deduction_lines(deductions)}
 
         [점수가 낮았던 단어] — 개선할 점의 근거로만 쓰세요
         {weak_lines}
