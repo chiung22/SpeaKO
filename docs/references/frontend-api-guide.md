@@ -244,6 +244,22 @@ DELETE /api/projects/{id}     기록 삭제
 - 마지막 한 장은 삭제할 수 없습니다 (`422`).
 - PPT 없이 만든 프로젝트(전체 대본 한 덩어리)는 `slide_number = 1`에 저장하면 됩니다.
 
+### 전체 대본 — 직접 이어붙이지 마세요 (`full_script`)
+
+'대본 확인' 화면처럼 **슬라이드를 합친 전체 대본**이 필요하면 `GET /api/projects/{id}` 응답의 `full_script`를 쓰세요. 서버가 `slide_number` 순서대로 이어붙여 내려줍니다.
+
+```json
+{ "data": {
+    "slides": [ {"slide_number": 1, "script": "첫 장입니다."}, {"slide_number": 2, "script": "둘째 장입니다."} ],
+    "full_script": "첫 장입니다.\n둘째 장입니다."
+} }
+```
+
+- 대본이 아직 생성되지 않았으면 **빈 문자열**입니다(키는 항상 있습니다).
+- 대본이 없는 슬라이드는 건너뜁니다 — 빈 줄이 생기지 않습니다.
+
+⚠️ **직접 합치실 경우 `"Slide 1:"` 같은 라벨을 붙이지 마세요.** 그 텍스트를 `reference_text`로 되보내면 라벨까지 *읽어야 할 말*로 채점돼서, 없는 누락이 무더기로 생기고 결과 화면에 `"Slide 1"`이 빨갛게 칠해집니다. 합치는 규칙을 한 곳(서버)에만 두려고 이 필드를 만들었습니다.
+
 ### 슬라이드 부분 재생성 — `POST /api/script/partial`
 ```json
 { "project_id": 12, "target_slide": 3, "style": "formal",
