@@ -4,29 +4,47 @@ API 키(ETRI/Azure/Clova Voice) 발급 대기 중 진행 가능한 작업들을 
 
 ---
 
-# 🔖 작업 재개 지점 (2026-08-17 기준)
+# 🔖 작업 재개 지점 (2026-08-17 저녁 기준)
 
 > **대화 컨텍스트가 비워진 뒤 이어서 작업할 때 여기부터 읽으세요.**
 > 바로 아래 "▶ 다음에 할 일"이 지금 지시받은 작업입니다.
 
-## 🚨 먼저 — EC2에 배포 안 된 커밋이 있습니다
+## 🚨 시연 전 필수 — 시연 PC 브라우저에 Mixed Content 예외 등록
 
-**`8dcd30c` (썸네일 base64 동봉, `include_thumbnails` 옵션)이 푸시만 되고 EC2에 안 올라갔습니다.**
-스프링 3단계(썸네일 연결)가 이 옵션에 의존하므로, 스프링이 붙이기 전에 배포해야 합니다.
+`https://speakofront.vercel.app`(HTTPS)이 `http://13.209.87.115:8080`(HTTP)을 부르므로
+브라우저가 기본적으로 차단합니다. 프론트는 수정하지 않기로 해서 **브라우저 예외로 우회
+중**입니다 — 시연에 쓸 PC마다 1회 필요:
 
-```bash
-ssh -i ~/.ssh/speako-key.pem ubuntu@13.209.87.115
-cd ~/SpeaKO && git pull && sudo docker compose up -d --build
-curl -s "http://127.0.0.1:8000/api/projects/48?include_thumbnails=true" | head -c 300
-```
+`chrome://settings/content/insecureContent` → "허용" 목록에 `https://speakofront.vercel.app`
+추가 (⚠️ 같은 주소가 "허용되지 않음" 목록에 있으면 삭제해야 먹힘 — 실제로 이걸로 한 번 헤맴).
 
-로컬 테스트 463건 통과. 런북: [docs/references/EC2_배포_런북.md](docs/references/EC2_배포_런북.md)
+시연 후 여유가 생기면 프론트에 `vercel.json` 리라이트가 근본 해결:
+`{"rewrites":[{"source":"/api/:path*","destination":"http://13.209.87.115:8080/api/:path*"}]}` + API base를 같은 origin으로.
 
-## ▶ 다음에 할 일 — 녹음 평가 1회 돌려서 1-3·1-4 확인
+**같은 날 서버 쪽에서 고친 것 (완료):**
+- 스프링이 `AI_BASE_URL=http://localhost:8000/`(끝 슬래시)로 수동 재시작돼 있었음 →
+  이중 슬래시 `//api/...`는 FastAPI에서 404 (실측). `~/.spring-env` 복원 후
+  `start-spring.sh`로 정상 재기동(11:18, 슬래시 없음 확인). **스프링 재시작은 반드시
+  `~/start-spring.sh`로** — 수동 export가 이 사고의 원인.
+- AI 컨테이너를 새 이미지로 교체 완료 — `include_thumbnails` **배포됨**
+  (프로젝트 48로 실측: `thumbnail_status: ready`, base64 정상 동봉).
 
-스프링이 `aiEvaluationId` 저장(1-3)과 상세 피드백(1-4)을 넣었다고 했는데,
-**EC2 12시간 로그에 평가 요청이 0건**이라 실제로 도는지 확인이 안 됐습니다.
-프론트에서 녹음 평가를 한 번 돌린 뒤 로그를 보면 됩니다.
+## ▶ 다음에 할 일 — 수정목록(남은 5건)을 스프링 담당자에게 전달
+
+**스프링 담당자가 10:56에 새 JAR을 배포**했고, 이전 수정목록 대부분이 이미 반영돼
+있습니다(하이라이팅 메서드/커스텀 호출, ai_evaluation_id+DB ALTER, TTS 서비스, hasFile,
+DTO 썸네일 필드). 문서를 **남은 5건만** 남기고 재작성 완료:
+
+1. 썸네일 빌더 3줄 (조회까지 해놓고 DTO에 안 실음 — 실측: 응답에 null로 나감)
+2. 일반 발표 하이라이팅 호출 (+try/catch — 새 메서드는 실패 시 throw)
+3. 재생성 FK 보호 (커스텀 대본은 이미 하이라이트가 쌓여서 지금도 터질 수 있음)
+4. AudioController 경로 버그 (`/api/audio/api/presentations/...` 이중 경로)
+5. 상세 피드백(1-4) 호출
+
+**11:31 프론트→스프링→AI 전 구간 대본 생성 실증 완료** (발표 57, 32초).
+프론트 Mixed Content는 브라우저 예외 등록으로 우회 중(시연 PC에도 필요, 아래 참고).
+
+디컴파일 원본: EC2 `/tmp/dec2/`(10:56 JAR), `/tmp/dec/`(07:38 JAR), CFR `/tmp/cfr.jar`
 
 ```bash
 sudo docker logs --since 1h -t speako-ai 2>&1 | grep "172.17.0.1"
@@ -36,20 +54,17 @@ sudo docker logs --since 1h -t speako-ai 2>&1 | grep "172.17.0.1"
 > 컨테이너 내부(=내가 돌린 스모크 테스트). 이걸 헷갈려서 "피드백 호출이 오고 있다"고
 > 잘못 읽은 적이 있습니다(2026-08-17).
 
-확인 SQL은 [스프링_최종_수정목록.md](docs/references/스프링_최종_수정목록.md) 맨 아래에 있습니다.
-
 ## 📋 스프링에 넘긴 것 — 문서 하나로 정리 완료
 
 **[docs/references/스프링_최종_수정목록.md](docs/references/스프링_최종_수정목록.md)** 하나만 보내면 됩니다.
-담당자가 보내준 실제 `PresentationService.java` 소스 + EC2 배포 JAR을 함께 보고 작성했습니다.
+(2026-08-17 저녁, 배포 JAR 디컴파일 기준으로 전면 재작성 — 이전에 전달했다면 회수할 것)
 
-현재 상태(2026-08-17):
+현재 상태(2026-08-17 저녁, 배포 JAR 기준):
 
 | | 내용 |
 |---|---|
-| ✅ 되고 있음 | 프로젝트 생성 → 대본 생성 → 폴링 (07:13 이후 로그로 확인) |
-| ⏳ 코드만 있음 | `aiEvaluationId` 저장, 상세 피드백 — 호출된 적 없음 |
-| ❌ 안 됨 | 하이라이팅(`analytic/words` 오타 + 일반 발표엔 호출 자체가 없음), 썸네일(DTO에 안 실림), TTS(없는 주소), 커스텀 대본(컴파일 오류 2개) |
+| ✅ 되고 있음 | 프로젝트 생성 → 대본 생성 → 폴링 → 저장, 컨트롤러 전체 원본 유지 |
+| ❌ 안 됨 | 하이라이팅(없는 주소+커스텀만), 썸네일(코드 부재), TTS(없는 주소), 평가 aiEvaluationId·피드백(코드 부재) |
 
 **썸네일은 base64 동봉 방식으로 확정**했습니다. 사용자가 "엔드포인트 바꾸지마, 절대"라고
 못박아서, 스프링 컨트롤러에 새 주소를 만들지 않고 상세 조회 응답에 실어 보냅니다.
