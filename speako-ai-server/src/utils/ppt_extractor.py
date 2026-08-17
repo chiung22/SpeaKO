@@ -1,4 +1,6 @@
 import os
+from concurrent.futures import ThreadPoolExecutor
+
 try:
     from pptx import Presentation
     from pptx.enum.shapes import MSO_SHAPE_TYPE
@@ -19,6 +21,12 @@ _MAX_OCR_IMAGES_PER_SLIDE = 3
 # 이미 텍스트박스로 내용이 충분히 들어있는 슬라이드는 이미지를 읽어도 얻을 게 별로 없다.
 # 비전은 "텍스트가 거의 없는 슬라이드"를 살리는 용도로만 쓴다.
 _OCR_SKIP_TEXT_LENGTH = 50
+# 비전 호출을 몇 개까지 동시에 보낼지. 대본 생성과 같은 HCX 엔드포인트라 같은 값을 쓴다.
+#
+# 왜 병렬인가(실측 2026-08-16): 글자가 없는 10장짜리 PPT를 순서대로 읽으니 **업로드에만
+# 116초**가 걸렸다. 정작 대본 생성은 12초다 — 사용자가 기다리는 시간의 대부분이 여기였다.
+# 이미지들끼리는 서로 의존하지 않으므로 한 번에 보내면 된다.
+_VISION_CONCURRENCY = max(1, int(os.getenv("HCX_MAX_CONCURRENCY", "4")))
 
 class PptExtractor:
     def __init__(self):
@@ -50,11 +58,11 @@ class PptExtractor:
             front_text_for_analysis = []
             all_slide_texts = []
 
-            for i, slide in enumerate(prs.slides):
+            # ── 1단계: 파일을 훑어 텍스트를 모으고, 비전으로 읽을 이미지를 목록으로 쌓는다.
+            #    python-pptx 객체를 워커 스레드로 넘기지 않으려고 여기서 blob까지 꺼내둔다.
+            pending = []   # 슬라이드별 {"texts": [...], "images": [(blob, content_type), ...]}
+            for slide in prs.slides:
                 slide_texts = []
-
-                # 1차: 텍스트박스에서 바로 읽히는 글자를 순서대로 모으고,
-                #      이미지로만 들어간 내용은 후보로만 쌓아둔다(비전 호출은 유료라 뒤에서 추려서 한다).
                 ocr_candidates = []
                 for shape in slide.shapes:
                     if hasattr(shape, "text") and shape.text.strip():
@@ -74,16 +82,51 @@ class PptExtractor:
                             continue
                         ocr_candidates.append((width_px * height_px, image))
 
-                # 2차: 텍스트가 거의 없는 슬라이드(= 이미지가 곧 내용인 장표)만 비전으로 읽는다.
-                #      큰 이미지일수록 본문일 확률이 높으니 넓이 순으로 상위 몇 장만 본다.
+                # 텍스트가 거의 없는 슬라이드(= 이미지가 곧 내용인 장표)만 비전으로 읽는다.
+                # 큰 이미지일수록 본문일 확률이 높으니 넓이 순으로 상위 몇 장만 본다.
+                images = []
                 if ocr_candidates and len("".join(slide_texts)) < _OCR_SKIP_TEXT_LENGTH:
                     ocr_candidates.sort(key=lambda item: item[0], reverse=True)
                     for _, image in ocr_candidates[:_MAX_OCR_IMAGES_PER_SLIDE]:
-                        ocr_text = self.image_text_extractor.extract_text_from_image(
-                            image.blob, context_hint, image.content_type
+                        try:
+                            images.append((image.blob, image.content_type))
+                        except Exception:
+                            continue
+
+                pending.append({"texts": slide_texts, "images": images})
+
+            # ── 2단계: 모아둔 이미지를 한꺼번에 동시 호출한다.
+            #    슬라이드를 하나씩 기다리면 이미지 30장짜리에서 2분이 걸린다(위 상수 주석 참고).
+            jobs = [(s_idx, i_idx)
+                    for s_idx, entry in enumerate(pending)
+                    for i_idx in range(len(entry["images"]))]
+            ocr_results = {}
+            if jobs:
+                def _read(job):
+                    s_idx, i_idx = job
+                    blob, content_type = pending[s_idx]["images"][i_idx]
+                    try:
+                        return job, self.image_text_extractor.extract_text_from_image(
+                            blob, context_hint, content_type
                         )
-                        if ocr_text.strip():
-                            slide_texts.append(ocr_text.strip())
+                    except Exception as err:
+                        # 이미지 한 장 실패가 업로드 전체를 깨면 안 된다. 그 장만 비우고 간다.
+                        print(f"⚠️ 이미지 텍스트 인식 실패(슬라이드 {s_idx + 1}): {err}")
+                        return job, ""
+
+                print(f"🖼️  이미지 {len(jobs)}장을 동시 {_VISION_CONCURRENCY}개씩 읽습니다.")
+                with ThreadPoolExecutor(max_workers=_VISION_CONCURRENCY) as pool:
+                    for job, text in pool.map(_read, jobs):
+                        if text and text.strip():
+                            ocr_results[job] = text.strip()
+
+            # ── 3단계: 원래 순서대로 병합한다(텍스트박스 먼저, 그 뒤에 넓이 순 이미지).
+            for i, entry in enumerate(pending):
+                slide_texts = list(entry["texts"])
+                for i_idx in range(len(entry["images"])):
+                    text = ocr_results.get((i, i_idx))
+                    if text:
+                        slide_texts.append(text)
 
                 slide_content = "\n".join(slide_texts)
 
