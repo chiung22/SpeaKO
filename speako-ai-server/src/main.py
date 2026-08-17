@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from typing import Literal, Optional
 from concurrent.futures import ThreadPoolExecutor
 import uvicorn
+import base64
 import os
 import re
 import shutil
@@ -1331,14 +1332,59 @@ async def list_evaluations(db: Session = Depends(get_db)):
         ],
     }
 
+def _thumbnail_base64(project_id: int, slide_number: int) -> str:
+    """썸네일 PNG를 base64 문자열로 읽는다. 없거나 읽지 못하면 None.
+
+    이미지를 JSON에 실어 보내는 건 원래 권할 방법이 아니다(브라우저 캐시가 안 먹고 응답이
+    커진다). 그런데 스프링 컨트롤러에 **새 주소를 만들지 않기로** 해서(2026-08-17), 이미지가
+    프론트까지 갈 통로가 상세 조회 응답밖에 없다. 그래서 조회할 때 함께 실어 보낸다.
+    기본은 꺼져 있고 include_thumbnails=true일 때만 붙는다 — 미리보기가 필요 없는 화면까지
+    한 장에 1MB씩 물게 할 이유는 없다.
+    """
+    path = thumbnail_generator.thumbnail_path(project_id, slide_number)
+    if not path:
+        return None
+    try:
+        with open(path, "rb") as image_file:
+            return base64.b64encode(image_file.read()).decode("ascii")
+    except OSError as err:
+        print(f"⚠️ 썸네일 읽기 실패({project_id}/{slide_number}): {err}")
+        return None
+
+
 @api.get("/api/projects/{project_id}")
-async def get_project(project_id: int, db: Session = Depends(get_db)):
-    """[프로젝트 상세 조회 API] 슬라이드별 대본, 발음 주의 단어, 평가 히스토리를 함께 반환합니다."""
+async def get_project(
+    project_id: int,
+    include_thumbnails: bool = False,
+    db: Session = Depends(get_db),
+):
+    """[프로젝트 상세 조회 API] 슬라이드별 대본, 발음 주의 단어, 평가 히스토리를 함께 반환합니다.
+
+    `include_thumbnails=true`를 붙이면 슬라이드마다 미리보기 PNG를 base64로 함께 싣는다.
+    이미지를 따로 받을 통로가 없는 클라이언트를 위한 것이라, 붙이지 않으면 응답은 예전과
+    완전히 동일하다(18장 기준 약 1MB 차이).
+    """
     project = db.get(models.Project, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다.")
 
     _thumbnail_numbers = set(thumbnail_generator.available_slide_numbers(project.id))
+
+    def _slide_payload(slide):
+        payload = {
+            "slide_number": slide.slide_number,
+            "source_content": slide.source_content,
+            "script": slide.script,
+            "has_thumbnail": slide.slide_number in _thumbnail_numbers,
+        }
+        if include_thumbnails:
+            # 키 자체는 항상 넣는다. 있을 때만 넣으면 프론트가 "키가 없는 것"과 "썸네일이
+            # 없는 것"을 구분하려고 분기를 하나 더 두게 된다.
+            payload["thumbnail_base64"] = (
+                _thumbnail_base64(project.id, slide.slide_number)
+                if payload["has_thumbnail"] else None
+            )
+        return payload
 
     return {
         "success": True,
@@ -1352,11 +1398,7 @@ async def get_project(project_id: int, db: Session = Depends(get_db)):
             # 편집 화면 왼쪽 미리보기 목록. has_thumbnail이 true인 슬라이드만 이미지 요청을 보내면 된다
             # (없는 걸 요청하면 404가 나고, 프론트는 깨진 이미지 아이콘을 그리게 된다).
             "thumbnail_status": project.thumbnail_status,
-            "slides": [
-                {"slide_number": s.slide_number, "source_content": s.source_content, "script": s.script,
-                 "has_thumbnail": s.slide_number in _thumbnail_numbers}
-                for s in project.slides
-            ],
+            "slides": [_slide_payload(s) for s in project.slides],
             # 슬라이드 대본을 순서대로 이어붙인 전체 대본('대본 확인' 화면이 그대로 그린다).
             # 프론트/스프링이 각자 합치면 "Slide 1:" 같은 라벨을 붙이거나 순서가 어긋나기 쉽고,
             # 그렇게 만든 텍스트를 평가 기준(reference_text)으로 되보내면 점수가 망가진다.

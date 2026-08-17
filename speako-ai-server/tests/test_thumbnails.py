@@ -330,3 +330,89 @@ def test_successful_run_still_reports_its_output(monkeypatch):
 
     assert ok is True
     assert "a.pdf" in message
+
+
+# ---------------------------------------------------------------------------
+# 조회 응답에 이미지를 실어 보내기 (include_thumbnails)
+#
+# 원래는 슬라이드마다 따로 GET 하는 게 맞다 — 브라우저가 하루 캐시하고 응답도 가볍다.
+# 그런데 스프링 컨트롤러에 새 주소를 만들지 않기로 해서(2026-08-17), 이미지가 프론트까지
+# 갈 통로가 상세 조회 응답밖에 없다. 기본은 꺼져 있어야 한다 — 미리보기가 필요 없는
+# 화면까지 18장 1MB를 물면 대본 표시가 그만큼 늦어진다.
+# ---------------------------------------------------------------------------
+
+
+def _project_with_one_thumbnail(db_session_factory):
+    """썸네일 PNG 파일이 실제로 하나 있는 프로젝트를 만든다."""
+    import base64 as _b64
+
+    db = db_session_factory()
+    try:
+        project = models.Project(name="썸네일 동봉", filename="deck.pptx", topic="주제",
+                                 keywords=[], thumbnail_status="ready")
+        project.slides = [
+            models.Slide(slide_number=1, source_content="원문1", script="첫 장입니다."),
+            models.Slide(slide_number=2, source_content="원문2", script="둘째 장입니다."),
+        ]
+        db.add(project)
+        db.commit()
+        project_id = project.id
+    finally:
+        db.close()
+
+    # 1번 슬라이드만 썸네일이 있는 상태 (2번은 없음)
+    directory = thumbnail_generator.project_dir(project_id)
+    os.makedirs(directory, exist_ok=True)
+    png = _b64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+    )
+    with open(os.path.join(directory, "1.png"), "wb") as f:
+        f.write(png)
+    return project_id, png
+
+
+def test_detail_has_no_base64_by_default(db_session_factory):
+    """기본 응답은 예전과 완전히 동일해야 한다 — 기존 프론트가 갑자기 1MB를 받으면 안 된다."""
+    project_id, _ = _project_with_one_thumbnail(db_session_factory)
+
+    slides = client.get(f"/api/projects/{project_id}").json()["data"]["slides"]
+
+    assert all("thumbnail_base64" not in s for s in slides), slides
+
+
+def test_detail_embeds_base64_when_asked(db_session_factory):
+    import base64 as _b64
+    project_id, png = _project_with_one_thumbnail(db_session_factory)
+
+    res = client.get(f"/api/projects/{project_id}", params={"include_thumbnails": "true"})
+
+    assert res.status_code == 200, res.text
+    slides = res.json()["data"]["slides"]
+    first = next(s for s in slides if s["slide_number"] == 1)
+    assert first["has_thumbnail"] is True
+    assert _b64.b64decode(first["thumbnail_base64"]) == png, "실제 PNG 바이트와 다르다"
+
+
+def test_missing_thumbnail_is_null_not_absent(db_session_factory):
+    """키를 빼버리면 프론트가 '키 없음'과 '썸네일 없음'을 따로 분기해야 한다."""
+    project_id, _ = _project_with_one_thumbnail(db_session_factory)
+
+    slides = client.get(f"/api/projects/{project_id}",
+                        params={"include_thumbnails": "true"}).json()["data"]["slides"]
+
+    second = next(s for s in slides if s["slide_number"] == 2)
+    assert second["has_thumbnail"] is False
+    assert "thumbnail_base64" in second, "키 자체가 빠졌다"
+    assert second["thumbnail_base64"] is None
+
+
+def test_embedding_does_not_disturb_the_rest_of_the_response(db_session_factory):
+    """대본·전체 대본이 함께 와야 한다 — 같은 응답 하나로 화면을 다 그리기 때문이다."""
+    project_id, _ = _project_with_one_thumbnail(db_session_factory)
+
+    data = client.get(f"/api/projects/{project_id}",
+                      params={"include_thumbnails": "true"}).json()["data"]
+
+    assert data["thumbnail_status"] == "ready"
+    assert data["full_script"] == "첫 장입니다.\n둘째 장입니다."
+    assert [s["script"] for s in data["slides"]] == ["첫 장입니다.", "둘째 장입니다."]
