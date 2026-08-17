@@ -38,7 +38,7 @@ from nlp.kiwi_analyzer import KiwiAnalyzer
 from g2p.g2p_client import G2pConverter
 from azure_speech.azure_client import PronunciationEvaluator
 from tts.clova_voice_client import ClovaVoiceClient
-from tts import tts_cache
+from tts import tts_cache, script_tts
 from tts.voices import VOICES, SPEED_MIN, SPEED_MAX, speaker_code
 from utils.ppt_extractor import PptExtractor
 from utils import pdf_extractor
@@ -163,6 +163,10 @@ MAX_PROJECT_NAME_LEN = 200
 # TTS 합성 대상 텍스트. Clova Voice는 **글자 수만큼 과금**되므로 상한이 곧 호출 1회당 비용 상한이다.
 # 이 엔드포인트는 단어 목록의 스피커 버튼용이라 실제로는 2~5자면 충분하다.
 MAX_TTS_TEXT_LEN = 100
+# 전체 대본 듣기는 단어 하나와 달리 수천 자다(실측 18장 = 7,346자). Clova Voice는 글자 수만큼
+# 과금되므로(월 100만 자까지 기본료 포함) 한 번의 요청이 무한정 커지지 않게 상한을 둔다.
+# 20,000자면 대본 18장짜리 세 편에 해당해 실사용에는 걸리지 않는다.
+MAX_TTS_SCRIPT_LEN = int(os.getenv("MAX_TTS_SCRIPT_LEN", "20000"))
 # 발표 시간은 생성할 대본 분량을 좌우한다 = 토큰 비용에 직결된다.
 MAX_PRESENTATION_MINUTES = 180
 # 대본 생성은 슬라이드 한 장당 HCX 호출 1회다. 길이 상한은 장당 분량만 막지 개수는 못 막으므로,
@@ -389,6 +393,21 @@ class TtsWordRequest(BaseModel):
     # 아직 없는 배포 프론트가 이 API를 그대로 써도 동작이 바뀌지 않게 한다.
     voice: Optional[Literal["동현", "대성", "혜리", "고은"]] = None
     speed: int = Field(0, ge=SPEED_MIN, le=SPEED_MAX)  # 음수=빠르게, 양수=느리게, 0=보통
+
+
+class TtsScriptRequest(BaseModel):
+    """결과 화면의 '전체 듣기' 버튼 → 대본을 통째로 읽어준다.
+
+    slide_number를 주면 그 슬라이드만 읽는다(슬라이드별 듣기 버튼용).
+    """
+    project_id: int = Field(..., ge=1)
+    slide_number: Optional[int] = Field(None, ge=1)  # None이면 전체 대본
+    voice: Optional[Literal["동현", "대성", "혜리", "고은"]] = None
+    speed: int = Field(0, ge=SPEED_MIN, le=SPEED_MAX)
+    # 발음 주의 단어 자리를 표준 발음으로 바꿔 읽을지. 기본은 켜둔다 — 끄면 Clova가
+    # '각자'를 [각자]로 읽어서, 발음 교정 서비스가 틀린 발음을 들려주게 된다.
+    apply_pronunciation: bool = True
+
 
 class SlideUpdateRequest(BaseModel):
     """결과 화면(피그마 05)에서 사용자가 직접 고친 대본을 저장할 때 쓴다. PPT O는 슬라이드별,
@@ -1065,6 +1084,127 @@ async def synthesize_word_pronunciation(request: TtsWordRequest, db: Session = D
             "Content-Disposition": f"inline; filename*=UTF-8''{quote(word)}.mp3",
             "X-TTS-Cache": cache_status,       # 과금 발생 여부(miss = 실제 합성 호출)
             "X-TTS-Text": quote(text),         # 실제로 합성한 문자열 — 디버깅/검증용
+        },
+    )
+
+
+def _script_pronunciation_pairs(project: "models.Project") -> list:
+    """대본 치환에 쓸 (철자, 표준발음) 쌍. 철자=발음인 단어는 script_tts가 알아서 걸러낸다."""
+    pairs = []
+    for w in project.difficult_words:
+        phoneme = w.phoneme if isinstance(w.phoneme, str) else ""
+        pronunciation = _clean_tts_text(phoneme)
+        if w.word and pronunciation:
+            pairs.append((w.word, pronunciation))
+    return pairs
+
+
+def _synthesize_chunks(chunks: list, speaker: str, speed: int):
+    """조각들을 순서대로 합성해 MP3 바이트 하나로 이어 붙인다. 하나라도 실패하면 (None, None).
+
+    ⚠️ 완전 블로킹이다. `run_in_threadpool`로 감쌀 것
+    (tests/test_blocking_offload.py가 이 계약을 지킨다).
+
+    **조각 단위로 캐시한다.** 사용자가 대본을 한 문장만 고쳐도 전체 캐시는 미스가 되는데,
+    조각 캐시가 있으면 고친 문장이 든 조각 하나만 다시 합성된다 — 나머지는 공짜다.
+
+    MP3를 그냥 붙여도 되는 이유: 같은 화자·속도·포맷으로 만든 조각들이라 인코딩 파라미터가
+    동일하다. 프레임 단위로 독립적인 형식이라 플레이어가 이어서 디코딩한다.
+    """
+    parts = []
+    synthesized = 0
+    for chunk in chunks:
+        piece = tts_cache.get(chunk, speaker, speed)
+        if piece is None:
+            piece = tts_client.synthesize_bytes(chunk, speaker, speed)
+            if piece is None:
+                return None, None
+            tts_cache.put(chunk, speaker, piece, speed)
+            synthesized += 1
+        parts.append(piece)
+    return b"".join(parts), synthesized
+
+
+@api.post("/api/tts/script")
+async def synthesize_script(request: TtsScriptRequest, db: Session = Depends(get_db)):
+    """[전체 대본 듣기 API] 대본 전체(또는 슬라이드 하나)를 읽어 MP3 바이트를 돌려준다.
+
+    /api/tts/word가 단어 하나를 들려준다면 이쪽은 발표 연습용으로 대본을 통째로 들려준다.
+    응답은 JSON이 아니라 **audio/mpeg 바이트**다(단어 API와 동일).
+
+    ## 왜 그냥 대본을 보내지 않는가
+    Clova Voice는 요청당 글자 수 상한이 있고 한국어 음운 규칙도 일부만 적용한다. 그래서
+    (1) 발음 주의 단어 자리를 표준 발음으로 바꾸고 (2) 문장 경계로 잘라 여러 번 부른 뒤
+    이어 붙인다. 자세한 근거는 tts/script_tts.py 참고.
+
+    ## 느리다
+    18장(7,346자) 기준 5조각 = Clova 호출 5회다. 첫 요청은 십수 초 걸릴 수 있으니 프론트는
+    로딩 표시를 띄워야 한다. **두 번째부터는 캐시 적중이라 즉시 돌아오고 과금도 없다**
+    (`X-TTS-Cache: hit`).
+    """
+    project = db.get(models.Project, request.project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다.")
+
+    if request.slide_number is not None:
+        slide = next((s for s in project.slides if s.slide_number == request.slide_number), None)
+        if slide is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"{request.slide_number}번 슬라이드가 없습니다.")
+        text = (slide.script or "").strip()
+        label = f"slide{request.slide_number}"
+    else:
+        text = _plain_script_text(project)
+        label = "script"
+
+    if not text:
+        raise HTTPException(
+            status_code=422,
+            detail="읽어줄 대본이 없습니다. 대본 생성을 먼저 완료해주세요.")
+
+    if len(text) > MAX_TTS_SCRIPT_LEN:
+        raise HTTPException(
+            status_code=422,
+            detail=f"대본이 너무 깁니다({len(text):,}자). "
+                   f"{MAX_TTS_SCRIPT_LEN:,}자까지 읽어드릴 수 있습니다. "
+                   "슬라이드별로 나눠서 들어주세요(slide_number 지정).")
+
+    if request.apply_pronunciation:
+        # G2P는 CPU 작업이 아니라 여기선 단순 문자열 치환이라 루프에서 돌려도 된다
+        # (발음기호는 /api/analysis/words가 이미 계산해 저장해 뒀다).
+        text = script_tts.apply_pronunciations(text, _script_pronunciation_pairs(project))
+
+    speaker = speaker_code(request.voice) if request.voice else TTS_SPEAKER
+
+    # 전체 텍스트로 먼저 찾는다. 적중하면 조각을 이어 붙일 필요도 없다.
+    audio = tts_cache.get(text, speaker, request.speed)
+    chunk_count = 0
+    cache_status = "hit"
+
+    if audio is None:
+        chunks = script_tts.split_for_tts(text)
+        if not chunks:
+            raise HTTPException(status_code=422, detail="읽어줄 대본이 없습니다.")
+        chunk_count = len(chunks)
+
+        audio, synthesized = await run_in_threadpool(
+            _synthesize_chunks, chunks, speaker, request.speed)
+        if audio is None:
+            raise HTTPException(status_code=502, detail="대본 음성 합성에 실패했습니다.")
+
+        # 조각이 전부 캐시에서 나왔으면 과금이 없었다는 뜻이다.
+        cache_status = "miss" if synthesized else "hit"
+        tts_cache.put(text, speaker, audio, request.speed)
+
+    return Response(
+        content=audio,
+        media_type="audio/mpeg",
+        headers={
+            "Content-Disposition": f"inline; filename*=UTF-8''{quote(label)}.mp3",
+            "X-TTS-Cache": cache_status,            # 과금 발생 여부(miss = 실제 합성 호출)
+            "X-TTS-Chars": str(len(text)),          # 합성한 글자 수 — 과금 단위
+            "X-TTS-Chunks": str(chunk_count),       # Clova 호출 횟수 (0 = 전체 캐시 적중)
         },
     )
 
