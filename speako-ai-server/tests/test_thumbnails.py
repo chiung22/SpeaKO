@@ -270,3 +270,63 @@ def test_background_job_records_failure(monkeypatch, db_session_factory, tmp_pat
 
     assert client.get(f"/api/projects/{project_id}").json()["data"]["thumbnail_status"] == "failed"
     assert not source.exists()
+
+
+# ── 상대 경로로 넘어온 원본 (2026-08-16 실측 버그) ──────────────────────────
+#
+# 업로드 핸들러가 넘겨주는 경로는 `temp_<uuid>.pptx` 같은 **상대 경로**다. 그런데
+# _to_pdf는 LibreOffice를 **work_dir을 cwd로** 실행하기 때문에, 상대 경로가 그대로
+# 넘어가면 그 폴더 기준으로 다시 해석돼 원본을 못 찾는다.
+#
+# 이게 조용히 묻혔던 이유: LibreOffice는 원본을 못 읽어도 **종료코드 0**을 돌려준다
+# ("Error: source file could not be loaded"만 stdout에 찍는다). 그래서 변환은 "성공"으로
+#처리되고 결과 PDF만 없어서, 프로덕션에서 **PPTX 썸네일이 전부 failed**였다.
+# (PDF 업로드는 변환 단계를 건너뛰어서 멀쩡했다 — 그래서 더 늦게 발견됐다)
+
+def test_relative_source_path_is_resolved_before_converting(monkeypatch, tmp_path):
+    """상대 경로로 들어와도 변환기에는 절대 경로가 넘어가야 한다."""
+    monkeypatch.setattr(thumbnail_generator, "is_available", lambda: True)
+
+    source = tmp_path / "temp_abcdef.pptx"
+    source.write_bytes(b"fake pptx")
+    monkeypatch.chdir(tmp_path)
+
+    seen = {}
+
+    def _fake_to_pdf(source_path, work_dir):
+        seen["path"] = source_path
+        return None, "변환 안 함"
+
+    monkeypatch.setattr(thumbnail_generator, "_to_pdf", _fake_to_pdf)
+    thumbnail_generator.generate_for_project(4242, "temp_abcdef.pptx")
+
+    assert os.path.isabs(seen["path"]), "상대 경로가 그대로 넘어갔습니다: %r" % seen["path"]
+    assert seen["path"] == str(source.resolve())
+
+
+def test_missing_pdf_message_carries_the_source_and_output(monkeypatch, tmp_path):
+    """결과 PDF가 없을 때 원인을 알 수 있어야 한다 — 원본 경로와 LibreOffice 출력을 남긴다."""
+    monkeypatch.setattr(thumbnail_generator, "_soffice_path", lambda: "/usr/bin/soffice")
+    monkeypatch.setattr(
+        thumbnail_generator, "_run",
+        lambda command, cwd=None: (True, "Error: source file could not be loaded"),
+    )
+
+    pdf_path, message = thumbnail_generator._to_pdf("/tmp/원본.pptx", str(tmp_path))
+
+    assert pdf_path is None
+    assert "/tmp/원본.pptx" in message
+    assert "source file could not be loaded" in message
+
+
+def test_successful_run_still_reports_its_output(monkeypatch):
+    """_run은 종료코드 0에서도 출력을 돌려줘야 한다(위 진단이 그 값에 기댄다)."""
+    class _Done:
+        returncode = 0
+        stdout = b"convert /tmp/a.pptx -> /tmp/a.pdf"
+
+    monkeypatch.setattr(thumbnail_generator.subprocess, "run", lambda *a, **k: _Done())
+    ok, message = thumbnail_generator._run(["soffice"])
+
+    assert ok is True
+    assert "a.pdf" in message

@@ -99,10 +99,12 @@ def _run(command, cwd=None):
     except OSError as err:
         return False, f"실행 실패: {err}"
 
+    tail = (completed.stdout or b"").decode("utf-8", "replace")[-300:].strip()
     if completed.returncode != 0:
-        tail = (completed.stdout or b"").decode("utf-8", "replace")[-300:]
         return False, f"종료코드 {completed.returncode} {tail}"
-    return True, ""
+    # 성공(종료코드 0)일 때도 출력을 돌려준다. LibreOffice는 원본을 못 읽어도 0으로 끝나므로,
+    # 호출부가 "결과 파일이 없다"를 발견했을 때 이 메시지가 유일한 단서다.
+    return True, tail
 
 
 def _to_pdf(source_path, work_dir):
@@ -128,7 +130,12 @@ def _to_pdf(source_path, work_dir):
 
     produced = glob.glob(os.path.join(work_dir, "*.pdf"))
     if not produced:
-        return None, "PDF 변환 결과가 없습니다."
+        # ⚠️ LibreOffice는 원본을 못 읽어도 **종료코드 0**을 돌려준다("Error: source file could
+        #    not be loaded"를 stdout에 찍고 끝난다). 그래서 여기까지 오는 실패가 실제로 있다.
+        #    무슨 일이 있었는지 남기지 않으면 원인 추적이 불가능하다(실측 2026-08-16: 상대
+        #    경로 때문에 PPTX 썸네일이 전부 실패했는데 "결과가 없습니다"만 보였다).
+        detail = (message or "").strip() or "LibreOffice가 아무 메시지도 남기지 않았습니다"
+        return None, f"PDF 변환 결과가 없습니다 (원본={source_path}, 출력={detail})"
     return produced[0], ""
 
 
@@ -165,6 +172,13 @@ def generate_for_project(project_id, source_path):
 
     if not source_path or not os.path.exists(source_path):
         return {"status": "failed", "count": 0, "message": "원본 파일을 찾을 수 없습니다."}
+
+    # ⚠️ 절대 경로로 고정한다. 아래에서 LibreOffice를 **work_dir을 cwd로** 실행하기 때문에,
+    #    상대 경로가 들어오면 그 폴더 기준으로 다시 해석돼 파일을 못 찾는다.
+    #    실측(2026-08-16): 업로드가 넘겨주는 경로가 `temp_<uuid>.pptx`(상대)라 PPTX 썸네일이
+    #    **전부 실패**했다. LibreOffice는 원본을 못 찾아도 종료코드 0을 돌려주기 때문에
+    #    "PDF 변환 결과가 없습니다"라는 결과만 남고 진짜 원인이 묻혔다.
+    source_path = os.path.abspath(source_path)
 
     destination = project_dir(project_id)
     work_dir = tempfile.mkdtemp(prefix="thumb_")
