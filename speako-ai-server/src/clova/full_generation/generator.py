@@ -482,6 +482,7 @@ class FullScriptGenerator:
             temperature=0.1,
         )
         line = (text or "").strip().splitlines()[0].strip() if (text or "").strip() else ""
+        line = re.sub(r"^[a-d]\)\s*", "", line)   # 보기 기호("a) ")가 답에 딸려오면 뗀다
         # 보기를 벗어난 답(설명문, '모름')은 버린다.
         if line and "모름" not in line and "불명" not in line and len(line) <= 60:
             return f"{line} (추정)"
