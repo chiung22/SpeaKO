@@ -678,3 +678,33 @@ def test_missing_slide_numbers_also_get_second_pass(monkeypatch):
 
     assert roles["2"] == "발표자 자기소개"
     assert roles["11"] == "제품·브랜드 이름 강조 (추정)"
+
+
+def test_transition_endings_are_stripped():
+    """중간 장 끝의 예고 멘트("자세히 설명드리겠습니다") 제거 — 사용자 피드백 2026-08-19:
+    "그런 멘트를 웬만하면 안 넣는 게 좋겠다. 마지막 슬라이드만 마무리 문장을 넣고 전부 빼 달라"."""
+    from clova.full_generation.generator import _strip_transition_ending as strip
+
+    assert strip("핵심 기능은 세 가지입니다. 이어서 각 기능을 자세히 설명드리겠습니다."
+                 ) == "핵심 기능은 세 가지입니다."
+    assert strip("발음 정확도를 평가합니다. 다음으로는 사용 사례를 살펴보도록 하겠습니다."
+                 ) == "발음 정확도를 평가합니다."
+    assert strip("저희 목표입니다. 계속해서 주목해 주세요!") == "저희 목표입니다."
+    assert strip("서비스 이름은 SpeaKO입니다. 그럼 지금부터 시작해볼까요?"
+                 ) == "서비스 이름은 SpeaKO입니다."
+    # 두 문장이 연달아 붙어도 전부 벗긴다.
+    assert strip("결론입니다. 이어서 알아보도록 하겠습니다. 계속해서 함께해 주시길 바랍니다."
+                 ) == "결론입니다."
+
+
+def test_informative_endings_survive_transition_strip():
+    """내용을 담은 '~하겠습니다'까지 지우면 본문이 유실된다."""
+    from clova.full_generation.generator import _strip_transition_ending as strip
+
+    keep = "예산은 다음 분기 초에 확정하겠습니다."
+    assert strip(keep) == keep
+    keep2 = "저희는 2027년까지 사용자 10만 명을 목표로 하고 있습니다."
+    assert strip(keep2) == keep2
+    # 예고 멘트뿐인 대본은 원문 유지(빈 대본 방지).
+    only = "자세히 설명드리겠습니다."
+    assert strip(only) == only

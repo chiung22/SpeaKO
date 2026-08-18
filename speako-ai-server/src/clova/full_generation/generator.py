@@ -196,6 +196,34 @@ _CLOSING_UNIT = (
     # ⚠️ '봐주시기 바랍니다'(빈 장의 화면 안내 문장)와 헷갈리면 안 된다 — '보시길'만 잡는다
     r"|[^.!?]*보시길\s*바랍니다"
 )
+# 중간 장 끝의 "예고·전환 멘트". 프롬프트로 금지해도 모델이 습관처럼 붙인다.
+# (사용자 피드백 2026-08-19: "'자세히 설명드리겠습니다' 같은 문장들이 어색하다 —
+#  마지막 장만 마무리 문장을 넣고 전부 빼 달라") 문장이 **이 형태로 끝나는 경우만** 잡는다.
+_TRANSITION_UNIT = (
+    # "이어서/다음으로 ~를 자세히 설명드리겠습니다", "말씀드리도록 하겠습니다"
+    r"[^.!?]*(?:설명|말씀|소개|안내|공유)[^.!?]{0,12}드리(?:도록\s*하)?겠습니다"
+    # "~를 살펴보도록 하겠습니다", "함께 알아보겠습니다"
+    r"|[^.!?]*(?:알아보|살펴보|들여다보)[^.!?]{0,12}겠습니다"
+    # "함께 살펴보시죠", "확인해 보시죠", "시작해볼까요?"
+    r"|[^.!?]*(?:보시죠|볼까요)"
+    # "다음 내용으로 넘어가겠습니다", "발표를 이어가도록 하겠습니다"
+    r"|[^.!?]*(?:넘어가|이어가|진행하)(?:도록\s*하)?겠습니다"
+    # "계속해서 주목해/집중해/함께해 주세요(주시기 바랍니다)"
+    r"|[^.!?]*(?:주목|집중|함께)\s*해\s*주[^.!?]*"
+)
+_TRANSITION_ENDING_PATTERN = re.compile(
+    r"(?:(?:^|(?<=[.!?]))\s*(?:" + _TRANSITION_UNIT + r")[.!?]?\s*)+$"
+)
+
+
+def _strip_transition_ending(script):
+    """중간 장 끝의 예고·전환 멘트를 제거한다. 그것뿐이면 원문을 유지한다(빈 대본 방지)."""
+    if not script:
+        return script
+    stripped = _TRANSITION_ENDING_PATTERN.sub("", script).strip()
+    return stripped if stripped else script
+
+
 # 각 마무리 단위는 문자열 시작 또는 문장 끝(.!?) 뒤에서만 시작한다.
 # 앵커가 없으면 "참여율을 80% 이상으로 끌어올리는 것이 목표입니다"의 문장 중간 '이상으로'까지
 # 마무리로 오인해 본문을 잘라먹는다.
@@ -514,6 +542,7 @@ class FullScriptGenerator:
                 if not is_last:
                     script = _strip_closing_greeting(script)
                     script = _strip_leading_closing(script)
+                    script = _strip_transition_ending(script)
                     # 첫 장이 아닌데 "안녕하세요"로 시작하는 것도 같은 이유로 코드에서 지운다.
                     if not is_first:
                         script = _strip_leading_greeting(script)
