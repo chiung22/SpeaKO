@@ -222,14 +222,17 @@ class PptExtractor:
                     continue
                 if any(ocr_results.get((s_idx, j)) for j in range(len(entry["images"]))):
                     continue
-                blob, content_type = entry["images"][0]
-                try:
-                    scene = self.image_text_extractor.describe_scene(blob, content_type)
-                except Exception as err:
-                    print(f"⚠️ 장면 설명 실패(슬라이드 {s_idx + 1}): {err}")
-                    scene = ""
-                if scene:
-                    entry["scene"] = scene
+                # 가장 큰 이미지가 빈 말풍선 같은 무정보 그림일 수 있어(실측: 이미지형 3장),
+                # 쓸 만한 묘사가 나올 때까지 상위 3장까지 시도한다.
+                for blob, content_type in entry["images"][:3]:
+                    try:
+                        scene = self.image_text_extractor.describe_scene(blob, content_type)
+                    except Exception as err:
+                        print(f"⚠️ 장면 설명 실패(슬라이드 {s_idx + 1}): {err}")
+                        scene = ""
+                    if scene:
+                        entry["scene"] = scene
+                        break
 
             # ── 3단계: 원래 순서대로 병합한다(텍스트박스 먼저, 그 뒤에 넓이 순 이미지).
             for i, entry in enumerate(pending):
