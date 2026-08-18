@@ -541,3 +541,24 @@ def test_empty_slide_leak_is_replaced_with_pointing_sentence():
     # 정상적인 화면 안내는 그대로 둔다.
     ok = "화면의 내용을 함께 봐주시기 바랍니다."
     assert _replace_leaked_empty_script(ok, 3) == ok
+
+
+def test_name_only_slide_is_treated_as_person_intro():
+    """원문이 이름 한 단어("진순")뿐인 장을 기능 설명으로 지어내면 안 된다.
+
+    실측(2026-08-19): "핵심 기능인 진순입니다"라고 지어냈고, PPT 주인은
+    "저는 SpeaKO 발표를 맡은 진순입니다"를 원했다. 초반 장은 발표자 소개로 유도한다.
+    """
+    from clova.full_generation.generator import _thin_source_instruction
+
+    early = _thin_source_instruction(2, "Slide 2: 진순")
+    assert "진순" in early and "발표자 소개" in early and "맡은 진순입니다" in early
+    assert "단정하면 안" in early
+
+    # 후반 장은 발표자라고 못 박지 않는다 (팀원·페르소나일 수 있음).
+    late = _thin_source_instruction(9, "Slide 9: 진순")
+    assert "인물(또는 팀·캐릭터)" in late and "맡은 진순입니다" not in late
+
+    # 이름이 아닌 제목("기술 스택")은 기존 thin 지시 그대로.
+    normal = _thin_source_instruction(2, "Slide 2: 서비스 기술 스택")
+    assert "2~3문장" in normal

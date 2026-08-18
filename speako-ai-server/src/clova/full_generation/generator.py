@@ -93,6 +93,18 @@ def _is_empty_source(block):
     return not re.sub(r"\s+", "", body)
 
 
+# 원문이 한글 2~4자 단어 하나뿐이면 사람 이름일 가능성이 크다.
+# 실측(2026-08-19): 발표자 닉네임 "진순"만 읽힌 장을 모델이 "핵심 기능인 진순"으로
+# 단정해 기능 설명을 지어냈다 — PPT 주인은 "저는 SpeaKO 발표를 맡은 진순입니다"를 원했다.
+_NAME_LIKE = re.compile(r"^[가-힣]{2,4}$")
+
+
+def _name_like_source(block):
+    """라벨을 뗀 원문이 이름 같은 단어 하나뿐이면 그 단어를, 아니면 None을 돌려준다."""
+    body = _SOURCE_LABELS.sub(" ", block or "").strip()
+    return body if _NAME_LIKE.match(body) else None
+
+
 # 비전이 글자는 못 읽고 장면 설명만 얻은 장의 표식 (ppt_extractor 3차 라운드가 붙인다).
 _SCENE_LABEL = "[화면 묘사]"
 
@@ -126,6 +138,22 @@ def _thin_source_instruction(slide_number, block=None):
             "청중에게 던지는 질문으로 시작하지도 마세요. "
             "⚠️ '이 슬라이드에는 내용이 없습니다', '내용을 확인할 수 없습니다' 같은 말을 "
             "청중에게 하면 안 됩니다 — 그건 지금 당신에게 주는 사정 설명이지 발표 대사가 아닙니다."
+        )
+
+    # 이름 같은 단어 하나뿐인 장: 기능·제품으로 단정하는 걸 막고 인물 소개로 유도한다.
+    name = _name_like_source(block) if block is not None else None
+    if name:
+        early = int(slide_number) <= 3
+        role_hint = (
+            "발표 초반 장이므로 발표자 소개일 가능성이 큽니다. "
+            f"'저는 이번 발표를 맡은 {name}입니다.'처럼 " if early
+            else f"'{name}'라는 인물(또는 팀·캐릭터)을 소개하는 "
+        )
+        return (
+            f"이 슬라이드의 원문은 '{name}' 한 단어뿐입니다 — 사람(발표자·팀원·캐릭터) "
+            f"이름일 가능성이 큽니다. {role_hint}짧은 소개 한두 문장만 쓰세요. "
+            f"'{name}'를 기능·제품·서비스·로고로 단정하면 안 됩니다. "
+            "원문에 없는 설명을 덧붙이지 말고, 두 문장을 넘기지 마세요."
         )
 
     return (
