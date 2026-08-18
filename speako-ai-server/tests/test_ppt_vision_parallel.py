@@ -242,3 +242,38 @@ def test_pdf_empty_pages_are_kept(tmp_path):
     numbers = [s["slide_number"] for s in result["slides"]]
     assert numbers == [1, 2, 3], f"빈 페이지가 사라졌다: {numbers}"
     assert all(s["content"] == "" for s in result["slides"])
+
+
+def test_template_images_do_not_hog_ocr_slots(tmp_path):
+    """모든 장에 반복되는 배경/배너가 넓이 상위 자리를 차지하면 내용 이미지가 안 읽힌다.
+
+    실측(2026-08-18, 이미지형 14장): 전 장에 깔린 1761×773 배경이 상위 3자리를 먹어서
+    4개 장이 원문 0자가 됐다 — 반복 이미지는 템플릿으로 보고 후보에서 뺀다.
+    """
+    # 같은 (800,600) 배경이 4장 전부에 깔려 있고, 각 장에 서로 다른 내용 이미지가 있다.
+    slides = [(None, [(800, 600), (300, 250)]),
+              (None, [(800, 600), (310, 250)]),
+              (None, [(800, 600), (320, 250)]),
+              (None, [(800, 600), (330, 250)])]
+    recorder = _Recorder()
+    result = _extract(tmp_path, slides, recorder)
+
+    read_sizes = set(recorder.calls)
+    assert (800, 600) not in read_sizes, "템플릿 배경을 읽었다 (내용 이미지 자리를 뺏는다)"
+    assert {(300, 250), (310, 250), (320, 250), (330, 250)} <= read_sizes, \
+        "내용 이미지가 읽히지 않았다"
+    # 내용도 정상으로 붙었는지
+    contents = {s["slide_number"]: s["content"] for s in result["slides"]}
+    assert contents[1] == "이미지300x250"
+
+
+def test_template_only_slide_still_reads_something(tmp_path):
+    """표지처럼 배경(=템플릿)뿐인 장은, 아예 안 읽는 것보다 배경이라도 읽는 게 낫다."""
+    slides = [(None, [(800, 600)]),
+              (None, [(800, 600), (300, 250)]),
+              (None, [(800, 600), (310, 250)])]
+    recorder = _Recorder()
+    _extract(tmp_path, slides, recorder)
+
+    # (800,600)은 3장 반복이라 템플릿이지만, 1장은 그것뿐이므로 거기서는 읽어야 한다.
+    assert (800, 600) in set(recorder.calls), "템플릿뿐인 장에서 아무것도 안 읽었다"

@@ -1,4 +1,6 @@
+import hashlib
 import os
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 
 try:
@@ -41,6 +43,13 @@ _OCR_SKIP_TEXT_LENGTH = 50
 #    올릴수록 빨라지는 구간이 아니다. 게다가 대본 생성과 같은 HCX 할당량을 나눠 쓰므로,
 #    여기서 429를 많이 만들면 대본 생성까지 느려진다. 조절이 필요하면 환경변수로 연다.
 _VISION_CONCURRENCY = max(1, int(os.getenv("VISION_MAX_CONCURRENCY", "2")))
+# 같은 이미지가 이 수 이상의 슬라이드에 반복되면 템플릿 장식(배경·배너·로고)으로 본다.
+#
+# 왜 필요한가(실측 2026-08-18, 이미지형 14장): 모든 장에 깔린 1761×773 배경과 963×132
+# 배너가 **넓이 상위 3자리를 전부 차지**해서, 정작 내용이 든 이미지(캐릭터 말풍선 등)는
+# 비전이 읽지도 못했다. 그 결과 4개 장이 원문 0자가 됐다. 배경은 글자가 없으니 읽어봐야
+# 돈만 나가고, 내용 이미지의 자리를 뺏는다.
+_TEMPLATE_IMAGE_MIN_SLIDES = 3
 
 class PptExtractor:
     def __init__(self):
@@ -72,12 +81,14 @@ class PptExtractor:
             front_text_for_analysis = []
             all_slide_texts = []
 
-            # ── 1단계: 파일을 훑어 텍스트를 모으고, 비전으로 읽을 이미지를 목록으로 쌓는다.
+            # ── 1단계: 파일을 훑어 텍스트를 모으고, 비전으로 읽을 이미지 후보를 쌓는다.
             #    python-pptx 객체를 워커 스레드로 넘기지 않으려고 여기서 blob까지 꺼내둔다.
-            pending = []   # 슬라이드별 {"texts": [...], "images": [(blob, content_type), ...]}
+            raw = []            # 슬라이드별 {"texts": [...], "candidates": [(넓이, blob, type), ...]}
+            blob_slide_count = Counter()   # 이미지 해시 → 등장한 슬라이드 수 (템플릿 감지용)
             for slide in prs.slides:
                 slide_texts = []
                 ocr_candidates = []
+                seen_in_slide = set()
                 for shape in slide.shapes:
                     if hasattr(shape, "text") and shape.text.strip():
                         slide_texts.append(shape.text.strip())
@@ -87,6 +98,7 @@ class PptExtractor:
                         try:
                             image = shape.image
                             width_px, height_px = image.size
+                            blob = image.blob
                         except Exception:
                             continue
                         if width_px < _MIN_OCR_IMAGE_WIDTH or height_px < _MIN_OCR_IMAGE_HEIGHT:
@@ -94,18 +106,39 @@ class PptExtractor:
                         aspect_ratio = max(width_px, height_px) / max(1, min(width_px, height_px))
                         if aspect_ratio > _MAX_OCR_ASPECT_RATIO:
                             continue
-                        ocr_candidates.append((width_px * height_px, image))
+                        digest = hashlib.sha1(blob).hexdigest()
+                        # 같은 슬라이드에 같은 이미지가 두 번 있어도 슬라이드 수는 1로 센다.
+                        if digest not in seen_in_slide:
+                            seen_in_slide.add(digest)
+                            blob_slide_count[digest] += 1
+                        ocr_candidates.append(
+                            (width_px * height_px, digest, blob, image.content_type))
+
+                raw.append({"texts": slide_texts, "candidates": ocr_candidates})
+
+            # ── 1.5단계: 여러 장에 반복되는 이미지는 템플릿 장식이다 — OCR 후보에서 뺀다.
+            #    배경·배너가 넓이 상위 자리를 차지하면 내용 이미지가 읽히지 못한다(위 상수 주석).
+            template_digests = {
+                digest for digest, count in blob_slide_count.items()
+                if count >= _TEMPLATE_IMAGE_MIN_SLIDES
+            }
+
+            pending = []   # 슬라이드별 {"texts": [...], "images": [(blob, content_type), ...]}
+            for entry in raw:
+                slide_texts = entry["texts"]
+                candidates = [c for c in entry["candidates"] if c[1] not in template_digests]
+                # 전부 템플릿뿐이면(표지가 배경만으로 된 장 등) 원래 후보로 되돌린다 —
+                # 아예 안 읽는 것보다는 배경이라도 읽어보는 쪽이 낫다.
+                if not candidates and entry["candidates"]:
+                    candidates = entry["candidates"]
 
                 # 텍스트가 거의 없는 슬라이드(= 이미지가 곧 내용인 장표)만 비전으로 읽는다.
                 # 큰 이미지일수록 본문일 확률이 높으니 넓이 순으로 상위 몇 장만 본다.
                 images = []
-                if ocr_candidates and len("".join(slide_texts)) < _OCR_SKIP_TEXT_LENGTH:
-                    ocr_candidates.sort(key=lambda item: item[0], reverse=True)
-                    for _, image in ocr_candidates[:_MAX_OCR_IMAGES_PER_SLIDE]:
-                        try:
-                            images.append((image.blob, image.content_type))
-                        except Exception:
-                            continue
+                if candidates and len("".join(slide_texts)) < _OCR_SKIP_TEXT_LENGTH:
+                    candidates.sort(key=lambda item: item[0], reverse=True)
+                    images = [(blob, content_type)
+                              for _, _, blob, content_type in candidates[:_MAX_OCR_IMAGES_PER_SLIDE]]
 
                 pending.append({"texts": slide_texts, "images": images})
 

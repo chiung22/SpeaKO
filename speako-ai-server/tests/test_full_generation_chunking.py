@@ -463,3 +463,21 @@ def test_thin_instruction_varies_by_slide_number():
     assert _thin_source_instruction(4) == first, "3개 예시를 순환해야 한다"
     for text in (first, second, third):
         assert "질문" in text and "지어내" in text
+
+
+def test_completely_empty_slide_gets_one_sentence_instruction():
+    """원문 0자인 장에 '2~3문장 안내'를 요구하면 모델이 주제를 추측해 단정한다.
+
+    실측(2026-08-18): 발표자 소개 사진뿐인 장에 "핵심 기능과 혜택들을 설명드리고자
+    합니다"라고 썼고, PPT 주인이 "그냥 자기소개 장인데 대본이 엄청 많다"고 지적했다.
+    빈 장은 한 문장 + 내용 단정 금지여야 한다.
+    """
+    from clova.full_generation.generator import _thin_source_instruction
+
+    empty = _thin_source_instruction(2, "Slide 2: ")
+    assert "한 문장" in empty and "단정" in empty
+
+    # 제목 한 줄이라도 있으면 기존 thin 지시(2~3문장 안내)를 유지한다.
+    thin = _thin_source_instruction(2, "Slide 2: 서비스 기술 스택")
+    assert "2~3문장" in thin
+    assert thin != empty

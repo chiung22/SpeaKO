@@ -87,8 +87,27 @@ _THIN_POINTING_EXAMPLES = (
 )
 
 
-def _thin_source_instruction(slide_number):
+def _is_empty_source(block):
+    """라벨을 떼면 글자가 하나도 없는가 — thin(제목 한 줄)보다 더 극단적인 상태."""
+    body = _SOURCE_LABELS.sub(" ", block or "")
+    return not re.sub(r"\s+", "", body)
+
+
+def _thin_source_instruction(slide_number, block=None):
     pointing = _THIN_POINTING_EXAMPLES[(int(slide_number) - 1) % len(_THIN_POINTING_EXAMPLES)]
+
+    # 완전히 빈 장(원문 0자)은 안내할 "주제 한 줄"조차 없다. 여기서 2~3문장을 요구하면
+    # 모델이 발표 주제로 슬라이드 내용을 **추측해서 단정한다** — 실측(2026-08-18):
+    # 발표자 소개 사진뿐인 장에 "핵심 기능과 혜택들을 간략히 설명드리고자 합니다"라고 썼고,
+    # PPT 주인이 "그 장은 그냥 자기소개 장인데 대본이 엄청 많다"고 지적했다.
+    if block is not None and _is_empty_source(block):
+        return (
+            "이 슬라이드에서는 읽을 수 있는 텍스트가 없습니다. 무엇이 담긴 슬라이드인지 "
+            "알 수 없으므로, 슬라이드의 내용이나 주제를 **절대 단정하거나 추측하지 마세요.** "
+            f"{pointing}처럼 화면을 봐 달라는 안내 **한 문장**만 쓰세요. 두 문장을 넘기지 마세요. "
+            "청중에게 던지는 질문으로 시작하지도 마세요."
+        )
+
     return (
         "이 슬라이드에는 제목/주제 한 줄 외에 참고할 내용이 없습니다. "
         "구체적인 항목 — 기술·제품·회사 이름, 숫자, 사람 이름, 목록 항목 — 을 절대 지어내지 마세요. "
@@ -290,7 +309,7 @@ class FullScriptGenerator:
         한 장이 실패하면 그 슬라이드는 영구 누락이므로 한 번 더 시도한다.
         """
         # 근거가 될 원문이 없는 슬라이드에는 다른 지시를 준다 — 안 그러면 모델이 빈칸을 지어낸다.
-        evidence = _thin_source_instruction(slide_number) if _is_thin_source(block) else _NORMAL_SOURCE_INSTRUCTION
+        evidence = _thin_source_instruction(slide_number, block) if _is_thin_source(block) else _NORMAL_SOURCE_INSTRUCTION
 
         for attempt in range(2):
             text = self._call_hcx(
