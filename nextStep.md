@@ -4,74 +4,80 @@ API 키(ETRI/Azure/Clova Voice) 발급 대기 중 진행 가능한 작업들을 
 
 ---
 
-# 🔖 작업 재개 지점 (2026-08-17 저녁 기준)
+# 🔖 작업 재개 지점 (2026-08-18 오후 기준)
 
 > **대화 컨텍스트가 비워진 뒤 이어서 작업할 때 여기부터 읽으세요.**
-> 바로 아래 "▶ 다음에 할 일"이 지금 지시받은 작업입니다.
+> 바로 아래 "▶ 보류 중 작업"이 지시받고 대기 중인 작업입니다.
 
-## 🚨 시연 전 필수 — 시연 PC 브라우저에 Mixed Content 예외 등록
+## ▶ 보류 중 작업 — 사용자 지시: "조금 있다가 하자"
 
-`https://speakofront.vercel.app`(HTTPS)이 `http://13.209.87.115:8080`(HTTP)을 부르므로
-브라우저가 기본적으로 차단합니다. 프론트는 수정하지 않기로 해서 **브라우저 예외로 우회
-중**입니다 — 시연에 쓸 PC마다 1회 필요:
+### ① 이미지형 PPT 장수 누락 (14장 → 10장만 등록)
 
-`chrome://settings/content/insecureContent` → "허용" 목록에 `https://speakofront.vercel.app`
-추가 (⚠️ 같은 주소가 "허용되지 않음" 목록에 있으면 삭제해야 먹힘 — 실제로 이걸로 한 번 헤맴).
+`02_이미지형.pptx`는 **14장**인데 AI 프로젝트 104에는 **10장만** 등록됐다
+(등록된 10장은 전부 대본 있음 — 생성 실패가 아니라 **업로드 추출 단계에서 장이 사라진 것**).
+사용자 체감 보고는 "14장 중 12장 생성"이라 수치가 다른데, 어느 쪽이든 장이 빈다.
 
-시연 후 여유가 생기면 프론트에 `vercel.json` 리라이트가 근본 해결:
-`{"rewrites":[{"source":"/api/:path*","destination":"http://13.209.87.115:8080/api/:path*"}]}` + API base를 같은 origin으로.
+- 확인 지점: [src/utils/ppt_extractor.py](speako-ai-server/src/utils/ppt_extractor.py) —
+  텍스트도 없고 이미지 추출도 안 된 슬라이드를 목록에서 버리는지
+- 방향: 빈 장도 슬라이드로 유지해야 **장 번호가 원본과 밀리지 않는다**
+  (번호가 밀리면 썸네일·하이라이트 좌표가 전부 어긋난다)
+- 예전 시연용 프로젝트 47도 "대본 10/10장"이었다 — 같은 현상이 그때부터 있었던 것
 
-**같은 날 서버 쪽에서 고친 것 (완료):**
-- 스프링이 `AI_BASE_URL=http://localhost:8000/`(끝 슬래시)로 수동 재시작돼 있었음 →
-  이중 슬래시 `//api/...`는 FastAPI에서 404 (실측). `~/.spring-env` 복원 후
-  `start-spring.sh`로 정상 재기동(11:18, 슬래시 없음 확인). **스프링 재시작은 반드시
-  `~/start-spring.sh`로** — 수동 export가 이 사고의 원인.
-- AI 컨테이너를 새 이미지로 교체 완료 — `include_thumbnails` **배포됨**
-  (프로젝트 48로 실측: `thumbnail_status: ready`, base64 정상 동봉).
+### ② 대본 고도화 계속
 
-## ▶ 다음에 할 일 — 수정목록(남은 5건)을 스프링 담당자에게 전달
+직전 배포 `bdf52ce`(중간 장의 "이상으로 …소개해 드렸습니다"류 문장형 마무리 제거 + 프롬프트
+보강)까지 완료. 다음 후보 (프로젝트 102 실물 대본에서 관찰):
 
-**스프링 담당자가 10:56에 새 JAR을 배포**했고, 이전 수정목록 대부분이 이미 반영돼
-있습니다(하이라이팅 메서드/커스텀 호출, ai_evaluation_id+DB ALTER, TTS 서비스, hasFile,
-DTO 썸네일 필드). 문서를 **남은 5건만** 남기고 재작성 완료:
-
-1. 썸네일 빌더 3줄 (조회까지 해놓고 DTO에 안 실음 — 실측: 응답에 null로 나감)
-2. 일반 발표 하이라이팅 호출 (+try/catch — 새 메서드는 실패 시 throw)
-3. 재생성 FK 보호 (커스텀 대본은 이미 하이라이트가 쌓여서 지금도 터질 수 있음)
-4. AudioController 경로 버그 (`/api/audio/api/presentations/...` 이중 경로)
-5. 상세 피드백(1-4) 호출
-
-**11:31 프론트→스프링→AI 전 구간 대본 생성 실증 완료** (발표 57, 32초).
-프론트 Mixed Content는 브라우저 예외 등록으로 우회 중(시연 PC에도 필요, 아래 참고).
-
-디컴파일 원본: EC2 `/tmp/dec2/`(10:56 JAR), `/tmp/dec/`(07:38 JAR), CFR `/tmp/cfr.jar`
+- **핵심 문구 반복** — "배려심과 협동심" 6장 중 5장에 등장. 슬라이드 독립 생성이라
+  교차 맥락이 없는 구조적 한계. 이웃 장 "내용"을 넘기면 역효과였음(generator.py 주석 참고)
+- **1장 과잉 요약** — 프롬프트에 금지는 넣었으니 다음 생성분으로 효과 확인부터
+- 진행 방식: 프론트에서 생성된 대본을 AI 서버 DB에서 꺼내 검토 → 수정 → 테스트 → 배포 반복
 
 ```bash
-sudo docker logs --since 1h -t speako-ai 2>&1 | grep "172.17.0.1"
+sudo docker exec speako-ai python -c "…"   # SQLite /app/data/speako.db, projects·slides 테이블
 ```
 
-> **로그의 IP로 출처를 구분합니다** — `172.17.0.1`은 호스트(=스프링), `127.0.0.1`은
-> 컨테이너 내부(=내가 돌린 스모크 테스트). 이걸 헷갈려서 "피드백 호출이 오고 있다"고
-> 잘못 읽은 적이 있습니다(2026-08-17).
+## 현재 시스템 상태 (2026-08-18 14시 실측)
 
-## 📋 스프링에 넘긴 것 — 문서 하나로 정리 완료
-
-**[docs/references/스프링_최종_수정목록.md](docs/references/스프링_최종_수정목록.md)** 하나만 보내면 됩니다.
-(2026-08-17 저녁, 배포 JAR 디컴파일 기준으로 전면 재작성 — 이전에 전달했다면 회수할 것)
-
-현재 상태(2026-08-17 저녁, 배포 JAR 기준):
-
-| | 내용 |
+| 항목 | 상태 |
 |---|---|
-| ✅ 되고 있음 | 프로젝트 생성 → 대본 생성 → 폴링 → 저장, 컨트롤러 전체 원본 유지 |
-| ❌ 안 됨 | 하이라이팅(없는 주소+커스텀만), 썸네일(코드 부재), TTS(없는 주소), 평가 aiEvaluationId·피드백(코드 부재) |
+| 하이라이팅 전 구간 | ✅ 정상 — 스프링 13:32 빌드(소문자 enum), 저장·조회·기존 데이터 모두 확인 |
+| 썸네일 base64 동봉 | ✅ 정상 (`include_thumbnails=true`) |
+| 등록 POST 응답 `slides: []` | ❌ **수정 JAR가 EC2에 안 옴** (13:32 그대로). 프론트는 등록 후 GET 재조회로 우회 중 |
+| TTS (`AudioController`) | ❌ `@PathVariable` 버그 — 첫 호출부터 500. [스프링_최종_수정목록.md](docs/references/스프링_최종_수정목록.md)의 남은 1건 |
+| 녹음 평가 (1-3·1-4) | ⏳ 코드는 배포됐으나 프론트가 아직 안 불러봄 — 실증 필요 |
+| AI 서버 | ✅ `bdf52ce` 배포됨 |
 
-**썸네일은 base64 동봉 방식으로 확정**했습니다. 사용자가 "엔드포인트 바꾸지마, 절대"라고
-못박아서, 스프링 컨트롤러에 새 주소를 만들지 않고 상세 조회 응답에 실어 보냅니다.
-그래서 AI 서버에 `include_thumbnails` 옵션을 추가한 것입니다(위 미배포 커밋).
+**`slides: []` 수정 내용** (스프링 담당자에게 전달됨, JAR 업로드+재시작만 남음):
+`createPresentationForCustomScript()`와 `saveScripts()`의 각 `save()` 다음 줄에
+`presentation.getSlides().add(slide);` / `slide.getScripts().add(script);` —
+JPA 1차 캐시 때문에 같은 요청 안의 상세 조회가 빈 컬렉션을 봄.
 
-**전체 대본 듣기는 만들었다가 지웠습니다**(`7bc2bee` → `d96fbb7` revert). 사용자 지시입니다.
-TTS는 단어 듣기(`/api/tts/word`)만 남아 있습니다.
+## 운영 메모
+
+- **AI 서버 재배포**: EC2에 docker compose **없음**. 런북 8절 명령으로:
+  `cd ~/SpeaKO/speako-ai-server && sudo docker build -t speako-ai . && sudo docker rm -f speako-ai && sudo docker run -d --name speako-ai --restart always -p 127.0.0.1:8000:8000 --env-file .env -v /home/ubuntu/speako-data:/app/data speako-ai`
+- **스프링 재시작은 반드시 `~/start-spring.sh`** (수동 export가 사고 원인이었음)
+- **상시 에러 감시 모니터** 사용 중 (스프링 output.log 예외 + AI 4xx/5xx). 세션이 끝나면
+  죽으므로 **새 세션에서 다시 걸 것**. 스프링 재배포는 output.log 초기화(truncated)로 감지됨
+- 로그 IP 구분: `172.17.0.1` = 스프링, `127.0.0.1` = 컨테이너 내부(내 스모크 테스트)
+- **시연 PC마다 Mixed Content 예외 1회 등록**: `chrome://settings/content/insecureContent`
+  → 허용 목록에 `https://speakofront.vercel.app` ("허용되지 않음" 목록에 있으면 삭제부터)
+- 시연용 업로드 폼 입력값(제목·시간·톤·가이드라인): [시연_준비.md](docs/presentations/시연_준비.md)
+
+## 정리 대상 테스트 데이터 (시연 전 삭제)
+
+- 스프링 DB: 계정 `itest2026@test.com`(userId 25), 발표 93·95·97·101·103
+- AI 서버 DB: 위 발표들이 만든 프로젝트 (93~103 사이의 "직접 입력한 대본"·"재기동검증" 등)
+
+## 📋 스프링 인계 문서
+
+**[docs/references/스프링_최종_수정목록.md](docs/references/스프링_최종_수정목록.md)** —
+사용자가 13:20 배포 기준으로 직접 갱신함(남은 1건 = TTS 컨트롤러). 단 **`slides: []` 건과
+하이라이트 enum 사후 확인(13:32 빌드로 해결됨)은 그 문서에 없음** — 채팅으로 전달했음.
+
+**전체 대본 듣기는 만들었다가 지웠습니다**(`7bc2bee` → `d96fbb7` revert). 사용자 지시.
+TTS는 단어 듣기(`/api/tts/word`)만 있습니다.
 
 ---
 
