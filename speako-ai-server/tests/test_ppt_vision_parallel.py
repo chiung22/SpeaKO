@@ -213,6 +213,9 @@ def test_vision_failure_keeps_the_page(tmp_path, monkeypatch):
     monkeypatch.setattr(
         extractor.image_text_extractor, "extract_text_from_image",
         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("vision down")))
+    # 실제 API로 새면 안 된다 — 장면 묘사(3차)도 죽은 상황을 가정한다.
+    monkeypatch.setattr(extractor.image_text_extractor, "describe_scene", lambda *a, **k: "")
+    extractor.claude_ocr.use_fallback = True
     path = _deck(tmp_path, [
         ("첫 장 내용", []),
         (None, [(800, 600)]),    # ← 이미지뿐인데 인식이 죽는 장
@@ -317,3 +320,98 @@ def test_no_second_round_when_first_round_found_text(tmp_path):
 
     assert (300, 250) not in set(recorder.calls), "글자를 이미 찾았는데 예비까지 읽었다"
     assert len(recorder.calls) == 3
+
+
+# ---------------------------------------------------------------------------
+# 3차(장면 묘사) + Claude OCR 폴백 (2026-08-19)
+# HCX-005 비전이 큰 일반 폰트도 못 읽는다는 실험 결과에 따른 두 안전망.
+# ---------------------------------------------------------------------------
+
+
+class _DescribingRecorder(_Recorder):
+    """글자는 하나도 못 읽지만 장면 설명은 돌려주는 비전 흉내."""
+
+    def extract_text_from_image(self, blob, context_hint, content_type):
+        super().extract_text_from_image(blob, context_hint, content_type)
+        return ""
+
+    def describe_scene(self, blob, content_type):
+        return "노란 옷을 입은 캐릭터가 인사하는 장면"
+
+
+def test_scene_description_is_labeled_for_textless_slide(tmp_path):
+    """글자를 못 읽은 장은 [화면 묘사] 라벨로 장면 설명이 실려야 한다.
+
+    라벨 없이 넣으면 생성기가 묘사를 슬라이드 원문으로 믿는다(과거 환각 사고).
+    """
+    extractor = PptExtractor()
+    extractor.image_text_extractor = _DescribingRecorder()
+    extractor.claude_ocr.use_fallback = True          # 키 없음 가정
+    result = extractor.extract_structured_data(_deck(tmp_path, [(None, [(600, 400)])]))
+
+    content = result["slides"][0]["content"]
+    assert content.startswith("[화면 묘사]"), content
+    assert "인사하는 장면" in content
+
+
+def test_scene_description_not_called_when_text_was_read(tmp_path):
+    """글자를 읽은 장은 장면 설명을 부르지 않는다 — 유료 호출이고 오염 위험이다."""
+    calls = []
+
+    class _TextRecorder(_Recorder):
+        def describe_scene(self, blob, content_type):
+            calls.append(1)
+            return "장면"
+
+    extractor = PptExtractor()
+    extractor.image_text_extractor = _TextRecorder()
+    extractor.claude_ocr.use_fallback = True
+    result = extractor.extract_structured_data(_deck(tmp_path, [(None, [(600, 400)])]))
+
+    assert calls == []
+    assert result["slides"][0]["content"] == "이미지600x400"
+
+
+def test_claude_ocr_rescues_slides_hcx_cannot_read(tmp_path):
+    """HCX가 0자를 준 장은 Claude OCR이 읽고, 성공하면 장면 묘사 없이 진짜 글자가 실린다."""
+    scene_calls = []
+
+    class _BlindRecorder(_Recorder):
+        def extract_text_from_image(self, blob, context_hint, content_type):
+            super().extract_text_from_image(blob, context_hint, content_type)
+            return ""
+        def describe_scene(self, blob, content_type):
+            scene_calls.append(1)
+            return "장면"
+
+    class _FakeClaude:
+        use_fallback = False
+        def extract_text_from_image(self, blob, content_type):
+            return "반갑습니다! 진순 입니다:)"
+
+    extractor = PptExtractor()
+    extractor.image_text_extractor = _BlindRecorder()
+    extractor.claude_ocr = _FakeClaude()
+    result = extractor.extract_structured_data(_deck(tmp_path, [(None, [(600, 400)])]))
+
+    assert "반갑습니다! 진순 입니다:)" in result["slides"][0]["content"]
+    assert scene_calls == [], "Claude가 읽었는데 장면 묘사까지 불렀다"
+
+
+def test_claude_ocr_skipped_without_key(tmp_path):
+    """키가 없으면 Claude 경로는 조용히 건너뛴다 — 기동/업로드가 죽으면 안 된다."""
+    calls = []
+
+    class _FakeClaude:
+        use_fallback = True
+        def extract_text_from_image(self, blob, content_type):
+            calls.append(1)
+            return "안 불려야 함"
+
+    extractor = PptExtractor()
+    extractor.image_text_extractor = _DescribingRecorder()
+    extractor.claude_ocr = _FakeClaude()
+    result = extractor.extract_structured_data(_deck(tmp_path, [(None, [(600, 400)])]))
+
+    assert calls == []
+    assert result["slides"][0]["content"].startswith("[화면 묘사]")

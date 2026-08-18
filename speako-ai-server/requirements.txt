@@ -19,3 +19,4 @@ Pillow==12.3.0
 # g2pkk가 의존하는 eunjeon/mecab 계열이 pkg_resources를 import하는데, setuptools 81부터
 # 제거 예정이라 없으면 G2P 로드가 실패한다. (실패하면 발음기호가 철자와 같아져 발음 코칭이 죽는다)
 setuptools<82
+anthropic>=0.40

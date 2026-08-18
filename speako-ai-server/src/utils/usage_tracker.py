@@ -35,6 +35,7 @@ _DEFAULT_STATE = {
     "azure_speech": {"calls": 0, "audio_seconds": 0.0},
     "clova_voice": {"calls": 0, "characters": 0},
     "stdict": {"calls": 0},
+    "claude_ocr": {"calls": 0, "input_tokens": 0, "output_tokens": 0},
     "rows": [],
 }
 
@@ -207,6 +208,18 @@ def log_stdict_call():
         state = _load_state()
         state["stdict"]["calls"] += 1
         _append_row(state, "표준국어대사전", "장단음 조회 호출 (무료)")
+        _save_and_write(state)
+
+
+def log_claude_ocr_call(input_tokens: int, output_tokens: int):
+    """Claude OCR 폴백 호출 기록. Haiku 기준 입력 $1/M라 이미지 한 장에 1원 미만이지만,
+    HCX와 별도 과금 주체(Anthropic)라 따로 집계해야 청구서를 대조할 수 있다."""
+    with _state_lock:
+        state = _load_state()
+        state["claude_ocr"]["calls"] += 1
+        state["claude_ocr"]["input_tokens"] += input_tokens
+        state["claude_ocr"]["output_tokens"] += output_tokens
+        _append_row(state, "Claude OCR", f"이미지 글자 읽기 — 입력 {input_tokens} + 출력 {output_tokens} 토큰")
         _save_and_write(state)
 
 

@@ -218,3 +218,76 @@ class ImageTextExtractor:
         except Exception as e:
             print(f"❌ HCX 비전 이미지 텍스트 추출 중 에러가 발생했습니다: {e}")
             return ""
+
+    def describe_scene(self, image_bytes: bytes, mime_type: str = "image/png") -> str:
+        """이미지가 **어떤 장면인지** 한 문장으로 받아온다. 글자 전사가 아니라 장면 설명이다.
+
+        ## 왜 별도 메서드인가 (2026-08-19)
+        HCX-005 비전은 큰 일반 폰트("반갑습니다! 진순 입니다:)")조차 못 읽는다 —
+        확대·프롬프트 4종 전부 실패(nextStep 백로그의 실험 기록). 그래서 글자가 하나도
+        안 나온 장은 대본이 "화면을 봐주세요" 한 문장이 된다. 그런데 묘사는 잘한다 —
+        예전엔 너무 잘해서 사고였다("검은 배경에 흰 선…"이 대본 근거로 오염).
+        이번엔 그 능력을 **분리된 통로**로 쓴다: 결과는 [화면 묘사] 라벨로 저장되고,
+        생성기는 이를 "장의 역할" 힌트로만 쓴다(내용으로 단정 금지 — generator.py 참고).
+
+        실패하거나 쓸모없는 답("설명할 수 없습니다")이면 빈 문자열.
+        """
+        if self.use_fallback:
+            return ""
+
+        prepared = _prepare_image(image_bytes, mime_type)
+        if prepared is None:
+            return ""
+        prepared_mime, prepared_bytes = prepared
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        instruction = (
+            "이 이미지가 발표 슬라이드에서 어떤 장면인지 **한 문장**으로만 설명해줘. "
+            "사람이나 캐릭터가 있으면 무엇을 하고 있는지를 중심으로. "
+            "글자가 보이면 그대로 인용해도 되지만, 안 보이는 글자를 지어내면 안 돼. "
+            "색깔이나 배경 나열은 하지 마. 설명할 장면이 없으면 "
+            f"{NO_TEXT_TOKEN} 이 한 단어만 답해."
+        )
+        payload = {
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "image_url",
+                     "dataUri": {"data": f"data:{prepared_mime};base64,"
+                                 + base64.b64encode(prepared_bytes).decode("utf-8")}},
+                    {"type": "text", "text": instruction},
+                ],
+            }],
+            "maxTokens": 120,
+            "temperature": 0.1,
+            "topP": 0.8,
+        }
+
+        try:
+            response = post_with_retry(self.endpoint, headers, payload, REQUEST_TIMEOUT_SECONDS, label="vision-scene")
+            result = response.json()
+            text = result["result"]["message"]["content"].strip()
+            usage = result.get("result", {}).get("usage", {})
+            log_hcx_call(
+                "vision_scene",
+                usage.get("promptTokens", 0),
+                usage.get("completionTokens", 0),
+                usage.get("totalTokens", 0),
+            )
+            if not text or NO_TEXT_TOKEN in text:
+                return ""
+            # 여러 문장이 와도 첫 문장만 쓴다 — 힌트는 짧을수록 오염 위험이 적다.
+            first = _SENTENCE_SPLIT.split(text)[0].strip()
+            # "이미지에는 텍스트가 포함되어 있지 않습니다" 같은 무정보 서술은 장면이 아니다.
+            # 이걸 통과시키면 대본이 "글자가 없다"는 얘기를 하게 된다 (실측: 로컬 테스트에서 재현).
+            if _is_image_description(first):
+                return ""
+            return first[:120]
+
+        except Exception as e:
+            print(f"❌ HCX 비전 장면 설명 중 에러가 발생했습니다: {e}")
+            return ""

@@ -9,6 +9,7 @@ try:
 except ImportError:
     print("⚠️ python-pptx 라이브러리가 설치되지 않았습니다. 터미널에서 'pip install python-pptx'를 실행해주세요.")
 
+from claude_vision.claude_ocr_client import ClaudeOcrClient
 from clova.vision.image_text_extractor import ImageTextExtractor
 from utils.text_heuristics import extract_frequent_terms
 
@@ -54,6 +55,7 @@ _TEMPLATE_IMAGE_MIN_SLIDES = 3
 class PptExtractor:
     def __init__(self):
         self.image_text_extractor = ImageTextExtractor()
+        self.claude_ocr = ClaudeOcrClient()
 
     def extract_structured_data(self, file_path: str, topic_hint: str = "", outline_hint: str = "") -> dict:
         """
@@ -192,6 +194,43 @@ class PptExtractor:
             for entry in pending:
                 entry["images"] = entry["images"] + entry["extra_images"]
 
+            # ── 2.5차: HCX가 한 글자도 못 읽은 장은 Claude OCR로 다시 읽어본다 (키 있을 때만).
+            #
+            # HCX-005 비전은 큰 일반 폰트도 못 읽는 경우가 있는데(2026-08-19 실험) Claude는
+            # 같은 이미지를 완벽히 읽었다. 대본 생성은 그대로 HCX다 — 여기는 글자 전사만.
+            # 키(ANTHROPIC_API_KEY)가 없으면 claude_ocr가 조용히 빈 값을 돌려줘 3차로 넘어간다.
+            if not self.claude_ocr.use_fallback:
+                for s_idx, entry in enumerate(pending):
+                    if entry["texts"] or not entry["images"]:
+                        continue
+                    if any(ocr_results.get((s_idx, j)) for j in range(len(entry["images"]))):
+                        continue
+                    for j, (blob, content_type) in enumerate(entry["images"]):
+                        text = self.claude_ocr.extract_text_from_image(blob, content_type)
+                        if text:
+                            ocr_results[(s_idx, j)] = text
+                    if any(ocr_results.get((s_idx, j)) for j in range(len(entry["images"]))):
+                        print(f"🔁 슬라이드 {s_idx + 1}: HCX가 못 읽은 글자를 Claude OCR이 읽었습니다.")
+
+            # ── 3차: 그래도 글자가 없는 장은 "어떤 장면인지" 한 문장을 받아 [화면 묘사]로 저장.
+            #
+            # HCX-005 비전은 큰 일반 폰트도 못 읽는 경우가 있다(2026-08-19 실험 — nextStep
+            # 백로그 참고). 글자를 포기한 장이라도 장면(인물이 인사하는 자기소개 장 등)을 알면
+            # 생성기가 장의 역할에 맞는 대본을 쓸 수 있다. 가장 큰 이미지 한 장만 물어본다.
+            for s_idx, entry in enumerate(pending):
+                if entry["texts"] or not entry["images"]:
+                    continue
+                if any(ocr_results.get((s_idx, j)) for j in range(len(entry["images"]))):
+                    continue
+                blob, content_type = entry["images"][0]
+                try:
+                    scene = self.image_text_extractor.describe_scene(blob, content_type)
+                except Exception as err:
+                    print(f"⚠️ 장면 설명 실패(슬라이드 {s_idx + 1}): {err}")
+                    scene = ""
+                if scene:
+                    entry["scene"] = scene
+
             # ── 3단계: 원래 순서대로 병합한다(텍스트박스 먼저, 그 뒤에 넓이 순 이미지).
             for i, entry in enumerate(pending):
                 slide_texts = list(entry["texts"])
@@ -199,6 +238,11 @@ class PptExtractor:
                     text = ocr_results.get((i, i_idx))
                     if text:
                         slide_texts.append(text)
+
+                # 글자가 없고 장면 설명만 있으면 라벨을 붙여 격리한다. 라벨 없이 넣으면
+                # 생성기가 묘사를 슬라이드 원문으로 믿는다(과거 환각 사고의 원인).
+                if not slide_texts and entry.get("scene"):
+                    slide_texts = [f"[화면 묘사] {entry['scene']}"]
 
                 slide_content = "\n".join(slide_texts)
 

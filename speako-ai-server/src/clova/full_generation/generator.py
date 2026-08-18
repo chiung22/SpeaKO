@@ -93,8 +93,26 @@ def _is_empty_source(block):
     return not re.sub(r"\s+", "", body)
 
 
+# 비전이 글자는 못 읽고 장면 설명만 얻은 장의 표식 (ppt_extractor 3차 라운드가 붙인다).
+_SCENE_LABEL = "[화면 묘사]"
+
+
 def _thin_source_instruction(slide_number, block=None):
     pointing = _THIN_POINTING_EXAMPLES[(int(slide_number) - 1) % len(_THIN_POINTING_EXAMPLES)]
+
+    # 글자 대신 장면 설명만 있는 장: 묘사를 "장의 역할" 힌트로만 쓰게 한다.
+    # 묘사를 내용처럼 단정하면 과거 환각 사고가 재발한다(비전이 화면을 설명한 문장이
+    # 대본 근거로 오염됐던 건 — image_text_extractor.py 상단 주석 참고).
+    if block is not None and _SCENE_LABEL in block:
+        return (
+            f"이 슬라이드에는 읽을 수 있는 글자가 없고, 화면이 어떤 장면인지에 대한 "
+            f"설명({_SCENE_LABEL} 부분)만 있습니다. 이 설명은 슬라이드에 적힌 내용이 "
+            "아니라 **화면의 생김새**입니다 — 그대로 읽거나 사실처럼 인용하지 마세요. "
+            "대신 장면으로 장의 역할을 짐작해 한두 문장으로 자연스럽게 말하세요. "
+            "예: 인물이 인사하는 장면이면 발표자를 소개하는 말, 고민하는 장면이면 "
+            "문제 상황을 여는 말. 묘사에 없는 구체 정보(이름·숫자·기능)를 지어내지 말고, "
+            "두 문장을 넘기지 마세요. 청중에게 던지는 질문으로 시작하지도 마세요."
+        )
 
     # 완전히 빈 장(원문 0자)은 안내할 "주제 한 줄"조차 없다. 여기서 2~3문장을 요구하면
     # 모델이 발표 주제로 슬라이드 내용을 **추측해서 단정한다** — 실측(2026-08-18):
@@ -356,7 +374,10 @@ class FullScriptGenerator:
         한 장이 실패하면 그 슬라이드는 영구 누락이므로 한 번 더 시도한다.
         """
         # 근거가 될 원문이 없는 슬라이드에는 다른 지시를 준다 — 안 그러면 모델이 빈칸을 지어낸다.
-        evidence = _thin_source_instruction(slide_number, block) if _is_thin_source(block) else _NORMAL_SOURCE_INSTRUCTION
+        # 장면 묘사는 30자를 넘어 thin 판정을 안 탈 수 있으므로 라벨로도 명시 분기한다 —
+        # 일반 지시("원문만 근거로")로 새면 모델이 묘사를 슬라이드 내용처럼 읽는다.
+        needs_guard = _is_thin_source(block) or _SCENE_LABEL in (block or "")
+        evidence = _thin_source_instruction(slide_number, block) if needs_guard else _NORMAL_SOURCE_INSTRUCTION
 
         for attempt in range(2):
             text = self._call_hcx(
