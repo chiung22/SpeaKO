@@ -276,6 +276,42 @@ def test_greeting_only_script_is_kept(monkeypatch):
     assert _strip_closing_greeting("감사합니다.") == "감사합니다."
 
 
+def test_sentence_style_closings_are_stripped(monkeypatch):
+    """단어형 인사만 지우던 시절의 구멍(2026-08-18 체육 지도안 실측).
+
+    1·2장이 "이상으로 …를 소개해 드렸습니다"로, 1장은 "많은 관심과 조언 부탁드립니다"까지
+    붙여 끝났다 — 문장형 마무리라 기존 패턴을 그대로 통과했다. 연속으로 읽으면 장마다
+    발표가 끝나는 것처럼 들린다.
+    """
+    from clova.full_generation.generator import _strip_closing_greeting
+
+    # 실제로 나왔던 형태 그대로
+    assert _strip_closing_greeting(
+        "평가는 과정 중심으로 이루어집니다. 이상으로 저희가 준비한 체육 교수·학습 지도안을 소개해 드렸습니다. "
+        "여러분의 많은 관심과 조언 부탁드립니다."
+    ) == "평가는 과정 중심으로 이루어집니다."
+    assert _strip_closing_greeting(
+        "정리 단계에서는 자기 평가를 진행합니다. 이상으로 체육 교수·학습 지도안의 개요를 소개해 드렸습니다."
+    ) == "정리 단계에서는 자기 평가를 진행합니다."
+    assert _strip_closing_greeting(
+        "본문입니다. 지금까지 프로젝트 구조를 말씀드렸습니다."
+    ) == "본문입니다."
+
+
+def test_content_requests_are_not_mistaken_for_closings(monkeypatch):
+    """본문에 있는 요청·설명 문장까지 지우면 내용이 유실된다."""
+    from clova.full_generation.generator import _strip_closing_greeting
+
+    # '부탁드립니다'라도 관심·조언·성원·격려가 없으면 본문 요청이다.
+    assert _strip_closing_greeting(
+        "실습 전에 안전 수칙 확인을 부탁드립니다."
+    ) == "실습 전에 안전 수칙 확인을 부탁드립니다."
+    # 문장 중간의 '이상으로'(수단·기준 의미)는 문장 시작이 아니면 건드리지 않는다.
+    assert _strip_closing_greeting(
+        "참여율을 80% 이상으로 끌어올리는 것이 목표입니다."
+    ) == "참여율을 80% 이상으로 끌어올리는 것이 목표입니다."
+
+
 def test_missing_slides_are_reported_in_result(monkeypatch):
     """끝내 못 만든 슬라이드는 콘솔에만 찍지 말고 결과에 실어야 한다.
     안 그러면 프론트가 '왜 이 장만 비어 있지?'를 알 수 없다."""
