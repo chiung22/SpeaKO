@@ -277,3 +277,43 @@ def test_template_only_slide_still_reads_something(tmp_path):
 
     # (800,600)은 3장 반복이라 템플릿이지만, 1장은 그것뿐이므로 거기서는 읽어야 한다.
     assert (800, 600) in set(recorder.calls), "템플릿뿐인 장에서 아무것도 안 읽었다"
+
+
+class _SelectiveRecorder(_Recorder):
+    """특정 크기 목록만 텍스트를 돌려주고 나머지는 빈 문자열(글자 없음)을 돌려준다."""
+
+    def __init__(self, text_sizes, **kwargs):
+        super().__init__(**kwargs)
+        self.text_sizes = set(text_sizes)
+
+    def extract_text_from_image(self, blob, context_hint, content_type):
+        result = super().extract_text_from_image(blob, context_hint, content_type)
+        import io as _io
+        from PIL import Image as _Image
+        size = _Image.open(_io.BytesIO(blob)).size
+        return result if size in self.text_sizes else ""
+
+
+def test_second_round_reads_more_images_when_top3_are_blank(tmp_path):
+    """상위 3장이 전부 무늬/배경이면 예비 후보를 마저 읽어야 한다.
+
+    실측(2026-08-19, 이미지형 2·3·13장): 말풍선 텍스트("반갑습니다 진순입니다:)")가 든
+    캐릭터 카드가 넓이 4번째라 1차에서 안 읽혀 원문 0자가 됐다.
+    """
+    # 큰 3장은 글자 없음, 4번째(300x250)에만 글자가 있다.
+    slides = [(None, [(900, 700), (800, 650), (700, 600), (300, 250)])]
+    recorder = _SelectiveRecorder(text_sizes=[(300, 250)])
+    result = _extract(tmp_path, slides, recorder)
+
+    assert (300, 250) in set(recorder.calls), "2차 라운드가 예비 후보를 읽지 않았다"
+    assert result["slides"][0]["content"] == "이미지300x250"
+
+
+def test_no_second_round_when_first_round_found_text(tmp_path):
+    """1차에서 글자를 찾은 장은 예비 후보를 읽지 않는다 — 유료 호출이다."""
+    slides = [(None, [(900, 700), (800, 650), (700, 600), (300, 250)])]
+    recorder = _SelectiveRecorder(text_sizes=[(900, 700)])   # 첫 장부터 글자 있음
+    _extract(tmp_path, slides, recorder)
+
+    assert (300, 250) not in set(recorder.calls), "글자를 이미 찾았는데 예비까지 읽었다"
+    assert len(recorder.calls) == 3

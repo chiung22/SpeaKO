@@ -134,38 +134,63 @@ class PptExtractor:
 
                 # 텍스트가 거의 없는 슬라이드(= 이미지가 곧 내용인 장표)만 비전으로 읽는다.
                 # 큰 이미지일수록 본문일 확률이 높으니 넓이 순으로 상위 몇 장만 본다.
-                images = []
+                images, extra_images = [], []
                 if candidates and len("".join(slide_texts)) < _OCR_SKIP_TEXT_LENGTH:
                     candidates.sort(key=lambda item: item[0], reverse=True)
-                    images = [(blob, content_type)
-                              for _, _, blob, content_type in candidates[:_MAX_OCR_IMAGES_PER_SLIDE]]
+                    ordered = [(blob, content_type) for _, _, blob, content_type in candidates]
+                    images = ordered[:_MAX_OCR_IMAGES_PER_SLIDE]
+                    # 상위 3장에서 글자가 하나도 안 나오면 읽을 예비 후보 (아래 2차 라운드).
+                    extra_images = ordered[_MAX_OCR_IMAGES_PER_SLIDE:_MAX_OCR_IMAGES_PER_SLIDE * 2]
 
-                pending.append({"texts": slide_texts, "images": images})
+                pending.append({"texts": slide_texts, "images": images, "extra_images": extra_images})
 
             # ── 2단계: 모아둔 이미지를 한꺼번에 동시 호출한다.
             #    슬라이드를 하나씩 기다리면 이미지 30장짜리에서 2분이 걸린다(위 상수 주석 참고).
-            jobs = [(s_idx, i_idx)
-                    for s_idx, entry in enumerate(pending)
-                    for i_idx in range(len(entry["images"]))]
-            ocr_results = {}
-            if jobs:
-                def _read(job):
-                    s_idx, i_idx = job
-                    blob, content_type = pending[s_idx]["images"][i_idx]
-                    try:
-                        return job, self.image_text_extractor.extract_text_from_image(
-                            blob, context_hint, content_type
-                        )
-                    except Exception as err:
-                        # 이미지 한 장 실패가 업로드 전체를 깨면 안 된다. 그 장만 비우고 간다.
-                        print(f"⚠️ 이미지 텍스트 인식 실패(슬라이드 {s_idx + 1}): {err}")
-                        return job, ""
+            def _read(job):
+                s_idx, i_idx, blob, content_type = job
+                try:
+                    return (s_idx, i_idx), self.image_text_extractor.extract_text_from_image(
+                        blob, context_hint, content_type
+                    )
+                except Exception as err:
+                    # 이미지 한 장 실패가 업로드 전체를 깨면 안 된다. 그 장만 비우고 간다.
+                    print(f"⚠️ 이미지 텍스트 인식 실패(슬라이드 {s_idx + 1}): {err}")
+                    return (s_idx, i_idx), ""
 
-                print(f"🖼️  이미지 {len(jobs)}장을 동시 {_VISION_CONCURRENCY}개씩 읽습니다.")
+            def _run_jobs(jobs, round_label):
+                if not jobs:
+                    return
+                print(f"🖼️  이미지 {len(jobs)}장을 동시 {_VISION_CONCURRENCY}개씩 읽습니다.{round_label}")
                 with ThreadPoolExecutor(max_workers=_VISION_CONCURRENCY) as pool:
-                    for job, text in pool.map(_read, jobs):
+                    for key, text in pool.map(_read, jobs):
                         if text and text.strip():
-                            ocr_results[job] = text.strip()
+                            ocr_results[key] = text.strip()
+
+            ocr_results = {}
+            _run_jobs([(s_idx, i_idx, blob, content_type)
+                       for s_idx, entry in enumerate(pending)
+                       for i_idx, (blob, content_type) in enumerate(entry["images"])], "")
+
+            # ── 2차 라운드: 상위 3장에서 글자가 하나도 안 나온 장만 예비 후보를 마저 읽는다.
+            #
+            # 왜 필요한가(실측 2026-08-19, 이미지형 2·3·13장): 텍스트가 든 이미지(캐릭터 카드의
+            # 말풍선 "반갑습니다 진순입니다:)")가 넓이 4~5번째라 1차에서 읽히지 않았고, 그 장들은
+            # 원문 0자가 됐다. 모든 장의 예비까지 다 읽으면 비용이 배가 되지만, **빈 장만**
+            # 추가로 읽으면 그 장들에서만 호출이 늘어난다.
+            retry_jobs = []
+            for s_idx, entry in enumerate(pending):
+                if entry["texts"] or not entry["extra_images"]:
+                    continue
+                if any(ocr_results.get((s_idx, j)) for j in range(len(entry["images"]))):
+                    continue
+                base = len(entry["images"])
+                retry_jobs.extend(
+                    (s_idx, base + j, blob, content_type)
+                    for j, (blob, content_type) in enumerate(entry["extra_images"]))
+            _run_jobs(retry_jobs, " (빈 장 2차)")
+            # 병합 루프가 예비 결과까지 훑도록 이미지 목록을 합쳐둔다.
+            for entry in pending:
+                entry["images"] = entry["images"] + entry["extra_images"]
 
             # ── 3단계: 원래 순서대로 병합한다(텍스트박스 먼저, 그 뒤에 넓이 순 이미지).
             for i, entry in enumerate(pending):
