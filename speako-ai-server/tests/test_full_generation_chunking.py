@@ -481,3 +481,30 @@ def test_completely_empty_slide_gets_one_sentence_instruction():
     thin = _thin_source_instruction(2, "Slide 2: 서비스 기술 스택")
     assert "2~3문장" in thin
     assert thin != empty
+
+
+def test_appeal_endings_are_stripped_on_middle_slides():
+    """권유형 맺음이 장마다 나오면 슬라이드 간 연결이 끊긴다 (PPT 주인 피드백 2026-08-19).
+
+    "기대해 주시기 바랍니다", "~해 보시길 바랍니다"로 중간 장이 끝나면
+    장마다 발표가 일단락된 것처럼 들린다.
+    """
+    from clova.full_generation.generator import _strip_closing_greeting
+
+    assert _strip_closing_greeting(
+        "다음으로는 이 서비스의 활용법을 설명해 드리겠습니다. 기대해 주시기 바랍니다."
+    ) == "다음으로는 이 서비스의 활용법을 설명해 드리겠습니다."
+    assert _strip_closing_greeting(
+        "실시간 피드백 시스템을 제공합니다. 이제 여러분의 발표 실력을 한 단계 업그레이드해 보시길 바랍니다."
+    ) == "실시간 피드백 시스템을 제공합니다."
+    assert _strip_closing_greeting(
+        "핵심 기능은 세 가지입니다. 다음 내용도 기대해 주세요."
+    ) == "핵심 기능은 세 가지입니다."
+
+
+def test_screen_pointing_sentence_is_not_stripped():
+    """빈 장의 화면 안내('봐주시기 바랍니다')는 우리가 시킨 문장이다 — 지우면 대본이 빈다."""
+    from clova.full_generation.generator import _strip_closing_greeting
+
+    keep = "화면의 내용을 함께 봐주시기 바랍니다."
+    assert _strip_closing_greeting(keep) == keep
