@@ -388,7 +388,7 @@ def test_thin_source_slide_gets_a_different_instruction(monkeypatch):
     """원문이 제목 한 줄뿐이면 모델은 빈칸을 추측으로 채운다.
     실측(2026-08-06): 텍스트가 0인 '서비스 기술 스택' 장에 React·Node.js·MongoDB를 통째로 지어냈다.
     '지어내지 마세요'만으로는 재발했으므로, 그런 장임을 감지해 무엇을 쓸지 대신 알려준다."""
-    from clova.full_generation.generator import _THIN_SOURCE_INSTRUCTION
+    from clova.full_generation.generator import _thin_source_instruction
 
     seen = []
     _stub_hcx(monkeypatch, lambda user_prompt: seen.append(user_prompt) or "대본입니다.")
@@ -399,8 +399,8 @@ def test_thin_source_slide_gets_a_different_instruction(monkeypatch):
 
     thin_prompt = next(p for p in seen if "서비스 기술 스택" in p)
     rich_prompt = next(p for p in seen if "구체적인 내용이 충분히" in p)
-    assert _THIN_SOURCE_INSTRUCTION in thin_prompt
-    assert _THIN_SOURCE_INSTRUCTION not in rich_prompt, "내용이 있는 장까지 일반 안내문으로 만들면 대본이 부실해진다"
+    assert _thin_source_instruction(1) in thin_prompt
+    assert _thin_source_instruction(2) not in rich_prompt, "내용이 있는 장까지 일반 안내문으로 만들면 대본이 부실해진다"
 
 
 def test_thin_source_slides_are_reported(monkeypatch):
@@ -423,3 +423,41 @@ def test_thin_source_detection_ignores_labels():
         "Slide 20: [발표자 가이드] 서비스 기술 스택 / [슬라이드에서 읽힌 글자] "
         "프론트엔드 React 백엔드 Spring Boot 데이터베이스 PostgreSQL 배포 AWS EC2"
     )
+
+
+def test_leading_closing_is_stripped_on_middle_slides():
+    """중간 장이 마무리 인사로 **시작**하는 경우(2026-08-18 실측, 이미지형 14장 중 10장).
+
+    "여러분, 지금까지 저희 발표를 들어주셔서 감사합니다. 이제 마지막으로…" — 끝 인사만
+    지우던 안전망이 시작 인사를 통과시켰다. 인사만 벗기고 뒤 본문은 살려야 한다.
+    """
+    from clova.full_generation.generator import _strip_leading_closing
+
+    assert _strip_leading_closing(
+        "여러분, 지금까지 저희 발표를 들어주셔서 감사합니다. 이제 한 가지 중요한 사실을 알려드리겠습니다."
+    ) == "이제 한 가지 중요한 사실을 알려드리겠습니다."
+    assert _strip_leading_closing(
+        "지금까지 경청해 주셔서 감사합니다. 다음 내용입니다."
+    ) == "다음 내용입니다."
+    # 본문이 '지금까지'로 시작하는 정상 문장은 건드리지 않는다.
+    assert _strip_leading_closing(
+        "지금까지의 판매 실적을 분석해 보겠습니다."
+    ) == "지금까지의 판매 실적을 분석해 보겠습니다."
+    # 인사뿐이면 원문 유지(빈 대본 방지).
+    assert _strip_leading_closing(
+        "지금까지 들어주셔서 감사합니다."
+    ) == "지금까지 들어주셔서 감사합니다."
+
+
+def test_thin_instruction_varies_by_slide_number():
+    """빈 장 지시가 전부 같으면 빈 장 대본도 전부 같아진다(실측: 빈 장 4개 중 3개가 동일 문장).
+
+    화면을 가리키는 예시 표현이 장 번호에 따라 달라져야 하고, 질문형 도입 금지도 들어가야 한다.
+    """
+    from clova.full_generation.generator import _thin_source_instruction
+
+    first, second, third = (_thin_source_instruction(n) for n in (1, 2, 3))
+    assert len({first, second, third}) == 3, "장 번호가 달라도 지시가 같다"
+    assert _thin_source_instruction(4) == first, "3개 예시를 순환해야 한다"
+    for text in (first, second, third):
+        assert "질문" in text and "지어내" in text

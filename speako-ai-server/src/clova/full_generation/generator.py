@@ -76,13 +76,28 @@ def _is_thin_source(block):
 
 # 근거가 없는 슬라이드에 주는 지시. "지어내지 마세요"만으로는 부족하고,
 # 대신 무엇을 쓰면 되는지를 알려줘야 모델이 빈칸을 추측으로 채우지 않는다.
-_THIN_SOURCE_INSTRUCTION = (
-    "이 슬라이드에는 제목/주제 한 줄 외에 참고할 내용이 없습니다. "
-    "구체적인 항목 — 기술·제품·회사 이름, 숫자, 사람 이름, 목록 항목 — 을 절대 지어내지 마세요. "
-    "대신 이 슬라이드에서 무엇을 다루는지 청중에게 안내하는 2~3문장만 쓰고, "
-    "세부 내용은 '보시는 바와 같이', '화면에 정리했습니다'처럼 슬라이드를 가리키는 표현으로 넘기세요. "
-    "짧아도 괜찮습니다. 분량을 채우려고 없는 내용을 만들어내면 안 됩니다."
+#
+# 화면을 가리키는 예시 표현을 슬라이드 번호에 따라 돌리는 이유: 장마다 독립 호출이라
+# 같은 지시를 주면 같은 문장이 나온다. 실측(2026-08-18, 이미지형 14장): 빈 장 4개 중
+# 3개가 "보시는 바와 같이 화면에 정리된 내용을 통해…"로 사실상 같은 대본이었다.
+_THIN_POINTING_EXAMPLES = (
+    "'보시는 바와 같이', '화면에 정리했습니다'",
+    "'지금 보시는 화면처럼', '이 슬라이드에 담긴 것처럼'",
+    "'화면의 내용을 함께 봐주시기 바랍니다', '슬라이드에 정리된 대로'",
 )
+
+
+def _thin_source_instruction(slide_number):
+    pointing = _THIN_POINTING_EXAMPLES[(int(slide_number) - 1) % len(_THIN_POINTING_EXAMPLES)]
+    return (
+        "이 슬라이드에는 제목/주제 한 줄 외에 참고할 내용이 없습니다. "
+        "구체적인 항목 — 기술·제품·회사 이름, 숫자, 사람 이름, 목록 항목 — 을 절대 지어내지 마세요. "
+        "대신 이 슬라이드에서 무엇을 다루는지 청중에게 안내하는 2~3문장만 쓰고, "
+        f"세부 내용은 {pointing}처럼 슬라이드를 가리키는 표현으로 넘기세요. "
+        "청중에게 던지는 질문('여러분은 혹시 ~하신 적 있으신가요?')으로 장을 시작하지 마세요 — "
+        "여러 장이 똑같은 질문으로 시작하게 됩니다. "
+        "짧아도 괜찮습니다. 분량을 채우려고 없는 내용을 만들어내면 안 됩니다."
+    )
 _NORMAL_SOURCE_INSTRUCTION = (
     "위 [PPT 텍스트]에 있는 내용만 근거로 쓰세요. 거기 없는 구체적 사실은 지어내지 마세요."
 )
@@ -117,6 +132,23 @@ def _strip_closing_greeting(script):
     if not script:
         return script
     stripped = _CLOSING_GREETING_PATTERN.sub("", script).strip()
+    return stripped if stripped else script
+
+
+# 중간 슬라이드가 마무리 인사로 **시작**하는 경우 (실측 2026-08-18, 이미지형 14장 중 10장:
+# "여러분, 지금까지 저희 발표를 들어주셔서 감사합니다. 이제 마지막으로…").
+# 끝에 붙는 인사만 지우던 안전망이 시작 인사를 통과시켰다. 뒤 문장은 본문이므로 인사만 벗긴다.
+_LEADING_CLOSING_PATTERN = re.compile(
+    r"^\s*(?:여러분[,.!]?\s*)?지금까지\s*(?:저희\s*|제\s*)?(?:발표를?\s*)?"
+    r"(?:들어|경청해|함께해)\s*주셔서\s*감사합니다[.!]?\s*"
+)
+
+
+def _strip_leading_closing(script):
+    """중간 슬라이드 첫머리의 마무리 인사를 제거한다. 인사뿐이면 원문을 유지한다."""
+    if not script:
+        return script
+    stripped = _LEADING_CLOSING_PATTERN.sub("", script, count=1).strip()
     return stripped if stripped else script
 
 
@@ -256,7 +288,7 @@ class FullScriptGenerator:
         한 장이 실패하면 그 슬라이드는 영구 누락이므로 한 번 더 시도한다.
         """
         # 근거가 될 원문이 없는 슬라이드에는 다른 지시를 준다 — 안 그러면 모델이 빈칸을 지어낸다.
-        evidence = _THIN_SOURCE_INSTRUCTION if _is_thin_source(block) else _NORMAL_SOURCE_INSTRUCTION
+        evidence = _thin_source_instruction(slide_number) if _is_thin_source(block) else _NORMAL_SOURCE_INSTRUCTION
 
         for attempt in range(2):
             text = self._call_hcx(
@@ -268,6 +300,7 @@ class FullScriptGenerator:
                 # 마지막 장이 아니면 "감사합니다" 같은 마무리 인사를 지운다(프롬프트 금지를 모델이 자주 어김).
                 if not is_last:
                     script = _strip_closing_greeting(script)
+                    script = _strip_leading_closing(script)
                 # 자료에 없는 발표자 이름("홍길동입니다")도 같은 이유로 코드에서 지운다.
                 script = _strip_placeholder_name(script)
                 return [{"slide_number": slide_number, "script": script}]
