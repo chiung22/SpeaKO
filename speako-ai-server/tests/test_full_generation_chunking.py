@@ -340,12 +340,14 @@ def test_placeholder_presenter_name_is_stripped():
     프롬프트로 이미 금지했는데도 어기므로 코드에서 지운다."""
     from clova.full_generation.generator import _strip_placeholder_name
 
+    # '맡았습니다'가 아니라 '시작하겠습니다' — PPT 주인 피드백(2026-08-18):
+    # "~의 발표를 맡았습니다"보다 "~ 발표 시작하겠습니다"가 실제 발표에서 자연스럽다.
     assert _strip_placeholder_name(
         "안녕하세요. 이번 발표를 맡은 홍길동입니다."
-    ) == "안녕하세요. 이번 발표를 맡았습니다."
+    ) == "안녕하세요. 이번 발표를 시작하겠습니다."
     assert _strip_placeholder_name(
         "안녕하세요. 발표자 OOO입니다."
-    ) == "안녕하세요. 발표를 맡았습니다."
+    ) == "안녕하세요. 발표를 시작하겠습니다."
     assert _strip_placeholder_name(
         "안녕하세요. 저는 ○○○입니다. 발표를 시작하겠습니다."
     ) == "안녕하세요. 발표를 시작하겠습니다."
