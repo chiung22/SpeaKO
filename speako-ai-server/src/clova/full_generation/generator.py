@@ -445,13 +445,16 @@ class FullScriptGenerator:
             if role and str(int(number)) in {str(int(n)) for n in thin_numbers}:
                 roles[str(int(number))] = role[:80]
 
-        # ── 2차: '불명'으로 답한 장은 객관식으로 다시 묻는다.
-        # 열린 질문("역할이 뭐냐")에는 모델이 소심하게 불명으로 도망가지만(temp 0.1에서 더 심함),
+        # ── 2차: '불명'으로 답했거나 **답에서 아예 빠진** 장은 객관식으로 다시 묻는다.
+        # 열린 질문("역할이 뭐냐")에는 모델이 소심하게 불명으로 도망가거나 일부 번호를
+        # 조용히 빼먹는다(실측: 11장이 두 판 연속 누락 → 힌트 없이 생성돼 기능을 지어냄).
         # 단서를 깔고 보기에서 고르게 하면 판단을 내린다 — 약한 모델에서 추론을 끌어내는 정석.
-        for number in list(roles):
-            if "불명" in roles[number]:
-                guessed = self._force_classify_slide(ppt_text, number, topic)
-                roles[number] = guessed if guessed else roles[number]
+        for number in (str(int(n)) for n in thin_numbers):
+            if number in roles and "불명" not in roles[number]:
+                continue
+            guessed = self._force_classify_slide(ppt_text, number, topic)
+            if guessed:
+                roles[number] = guessed
 
         if roles:
             print(f"🧭 장 역할 분석: {roles}")

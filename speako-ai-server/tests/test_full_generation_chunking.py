@@ -657,3 +657,24 @@ def test_role_hint_forbids_asserting_headcount():
 
     hinted = _thin_source_instruction(2, "Slide 2: 진순 이화진", role_hint="발표자 자기소개")
     assert "인원수" in hinted and "단정" in hinted
+
+
+def test_missing_slide_numbers_also_get_second_pass(monkeypatch):
+    """1차 분석이 조용히 빼먹은 번호도 2차 객관식으로 보낸다.
+
+    실측(2026-08-19): 11장이 두 판 연속 1차 답에서 누락돼 힌트 없이 생성됐고,
+    원문 "SPEAKO" 6자로 실시간 번역·음성 인식 기능을 지어냈다.
+    """
+    gen = _generator()
+
+    def fake_call(system, user, **kwargs):
+        if "[장 역할 분석 — 2차]" in user:
+            return "제품·브랜드 이름 강조"
+        return "2: 발표자 자기소개"        # 11은 답에서 빠짐
+
+    monkeypatch.setattr(gen, "_call_hcx", fake_call)
+    roles = type(gen)._analyze_slide_roles_real(
+        gen, "Slide 2: 진순\nSlide 11: SPEAKO", ["2", "11"], "SpeaKO")
+
+    assert roles["2"] == "발표자 자기소개"
+    assert roles["11"] == "제품·브랜드 이름 강조 (추정)"
