@@ -567,7 +567,18 @@ def test_role_analysis_parses_roles_and_drops_unknown(monkeypatch):
 
     roles = type(gen)._analyze_slide_roles_real(gen, "Slide 2: 진순\nSlide 3: ", ["2", "3"], "SpeaKO")
 
-    assert roles == {"2": "발표자 자기소개 — '진순'은 발표자 이름"}
+    # '불명'도 유지한다 — 버리면 일반 지시로 흘러가 모델이 자유 연상을 한다
+    # (실측: '진순'을 "음식 관련 용어"로 해석). 목록 밖 번호(9)만 버린다.
+    assert roles == {"2": "발표자 자기소개 — '진순'은 발표자 이름", "3": "불명"}
+
+
+def test_unknown_role_forbids_interpretation():
+    """분석이 '불명'이라 한 장은 단어 해석을 금지하고 화면 안내만 시킨다."""
+    from clova.full_generation.generator import _thin_source_instruction
+
+    unknown = _thin_source_instruction(2, "Slide 2: 진순", role_hint="불명")
+    assert "해석하거나 추측" in unknown and "한두 문장" in unknown
+    assert "역할은" not in unknown
 
 
 def test_role_hint_reaches_the_slide_prompt(monkeypatch):

@@ -109,6 +109,15 @@ def _thin_source_instruction(slide_number, block=None, role_hint=None):
     # 장별 독립 생성이라 모델은 덱 맥락을 모른다 — "진순"이 발표자 이름인 건 다른 장들과
     # 함께 봐야 알 수 있다(실측 2026-08-19: 맥락 없이 "핵심 기능인 진순"으로 단정).
     if role_hint:
+        # 분석조차 "불명"이라고 답한 장: 해석하면 반드시 지어내기가 된다(실측: '진순'을
+        # "음식 관련 용어"로 해석). 모르면 아무 의미도 부여하지 말고 화면만 가리킨다.
+        if "불명" in role_hint:
+            return (
+                "이 슬라이드의 원문은 몇 단어뿐이고, 그 의미를 덱 맥락으로도 확정할 수 "
+                "없습니다. **원문 단어의 뜻을 해석하거나 추측해서 설명하지 마세요.** "
+                f"{pointing}처럼 화면을 봐 달라는 안내 한두 문장만 쓰세요. "
+                "청중에게 던지는 질문으로 시작하지 마세요."
+            )
         return (
             f"이 슬라이드는 원문이 빈약하지만, 덱 전체를 분석한 결과 이 장의 역할은 "
             f"'{role_hint}'입니다. 이 역할에 맞는 대본을 한두 문장으로만 쓰세요. "
@@ -427,8 +436,10 @@ class FullScriptGenerator:
         roles = {}
         for match in _ROLE_LINE.finditer(text or ""):
             number, role = match.group(1), match.group(2).strip()
-            # '불명'은 힌트가 아니다 — 넣으면 대본에 "역할이 불명확한 장입니다"가 나온다.
-            if role and "불명" not in role and str(int(number)) in {str(int(n)) for n in thin_numbers}:
+            # '불명'도 버리지 않는다 — "모른다"는 판정 자체가 중요한 정보다. 버리면 일반
+            # thin 지시로 흘러가 모델이 자유 연상을 한다(실측 2026-08-19: '진순'을
+            # "음식 관련 용어"라고 해석). 불명이면 지시 단계에서 해석 금지로 처리한다.
+            if role and str(int(number)) in {str(int(n)) for n in thin_numbers}:
                 roles[str(int(number))] = role[:80]
         if roles:
             print(f"🧭 장 역할 분석: {roles}")
