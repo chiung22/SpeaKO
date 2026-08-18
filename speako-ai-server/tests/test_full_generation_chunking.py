@@ -562,7 +562,7 @@ def test_role_hint_overrides_generic_thin_instruction():
 def test_role_analysis_parses_roles_and_drops_unknown(monkeypatch):
     """분석 응답("번호: 역할")을 dict로 읽고, '불명'과 목록 밖 번호는 버린다."""
     gen = _generator()
-    monkeypatch.setattr(gen, "_call_hcx", lambda system, user:
+    monkeypatch.setattr(gen, "_call_hcx", lambda system, user, **kwargs:
         "2: 발표자 자기소개 — '진순'은 발표자 이름\n3: 불명\n9: 목록에 없는 장")
 
     roles = type(gen)._analyze_slide_roles_real(gen, "Slide 2: 진순\nSlide 3: ", ["2", "3"], "SpeaKO")
