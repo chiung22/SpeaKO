@@ -438,12 +438,48 @@ class FullScriptGenerator:
             number, role = match.group(1), match.group(2).strip()
             # '불명'도 버리지 않는다 — "모른다"는 판정 자체가 중요한 정보다. 버리면 일반
             # thin 지시로 흘러가 모델이 자유 연상을 한다(실측 2026-08-19: '진순'을
-            # "음식 관련 용어"라고 해석). 불명이면 지시 단계에서 해석 금지로 처리한다.
+            # "음식 관련 용어"라고 해석). 불명이면 아래 2차 객관식으로 좁힌다.
             if role and str(int(number)) in {str(int(n)) for n in thin_numbers}:
                 roles[str(int(number))] = role[:80]
+
+        # ── 2차: '불명'으로 답한 장은 객관식으로 다시 묻는다.
+        # 열린 질문("역할이 뭐냐")에는 모델이 소심하게 불명으로 도망가지만(temp 0.1에서 더 심함),
+        # 단서를 깔고 보기에서 고르게 하면 판단을 내린다 — 약한 모델에서 추론을 끌어내는 정석.
+        for number in list(roles):
+            if "불명" in roles[number]:
+                guessed = self._force_classify_slide(ppt_text, number, topic)
+                roles[number] = guessed if guessed else roles[number]
+
         if roles:
             print(f"🧭 장 역할 분석: {roles}")
         return roles
+
+    def _force_classify_slide(self, ppt_text, slide_number, topic=""):
+        """1차 분석이 '불명'이라 한 장을 단서 + 객관식으로 다시 묻는다. 실패하면 빈 문자열."""
+        user_prompt = (
+            "[장 역할 분석 — 2차]\n"
+            f"발표 주제: {topic or '(미상)'}\n\n"
+            f"{ppt_text}\n\n"
+            f"{int(slide_number)}번 장의 역할을 판단해야 합니다. 단서:\n"
+            f"- 이 장의 원문(위 Slide {int(slide_number)}: 뒤의 내용)이 몇 단어뿐입니다\n"
+            "- 그 단어가 다른 장에도 나오는지, 발표의 몇 번째 장인지(표지 직후면 소개일 가능성)를 보세요\n\n"
+            "반드시 아래 중 **하나만** 고르세요. '모름'은 답이 아닙니다:\n"
+            "a) 발표자 또는 팀 소개 — 원문 단어는 이름\n"
+            "b) 인물·캐릭터·페르소나 소개 — 원문 단어는 이름\n"
+            "c) 제품·브랜드 이름 강조\n"
+            "d) 섹션 전환·꾸밈 장\n"
+            "출력은 딱 한 줄: 선택한 보기의 설명 부분만 (예: 발표자 또는 팀 소개 — 원문 단어는 이름)"
+        )
+        text = self._call_hcx(
+            "너는 발표 자료 분석가다. 주어진 보기 중 가장 그럴듯한 하나를 반드시 고른다.",
+            user_prompt,
+            temperature=0.1,
+        )
+        line = (text or "").strip().splitlines()[0].strip() if (text or "").strip() else ""
+        # 보기를 벗어난 답(설명문, '모름')은 버린다.
+        if line and "모름" not in line and "불명" not in line and len(line) <= 60:
+            return f"{line} (추정)"
+        return ""
 
     def _request_one_slide(self, slide_number, block, position, presentation_time, style, extra_requirement, audience="", topic="", is_last=True, is_first=False, role_hint=None):
         """

@@ -562,8 +562,10 @@ def test_role_hint_overrides_generic_thin_instruction():
 def test_role_analysis_parses_roles_and_drops_unknown(monkeypatch):
     """분석 응답("번호: 역할")을 dict로 읽고, '불명'과 목록 밖 번호는 버린다."""
     gen = _generator()
+    # 2차 객관식 질문에는 '모름'을 답해 3장이 불명으로 남는 경우를 본다.
     monkeypatch.setattr(gen, "_call_hcx", lambda system, user, **kwargs:
-        "2: 발표자 자기소개 — '진순'은 발표자 이름\n3: 불명\n9: 목록에 없는 장")
+        "모름" if "[장 역할 분석 — 2차]" in user
+        else "2: 발표자 자기소개 — '진순'은 발표자 이름\n3: 불명\n9: 목록에 없는 장")
 
     roles = type(gen)._analyze_slide_roles_real(gen, "Slide 2: 진순\nSlide 3: ", ["2", "3"], "SpeaKO")
 
@@ -606,3 +608,40 @@ def test_role_analysis_failure_falls_back_to_generic_thin(monkeypatch):
     result = _generator().generate_full_script(_ppt_text(2), 4, "격식체")
 
     assert [s["slide_number"] for s in result["slides"]] == ["1", "2"]
+
+
+def test_unknown_role_is_reasked_as_multiple_choice(monkeypatch):
+    """열린 질문에 '불명'으로 도망간 장은 단서+객관식 2차 질문으로 좁힌다.
+
+    사용자 피드백(2026-08-19): "추론은 안 되나? 생성형 AI잖아" — 약한 모델에서
+    추론을 끌어내려면 열린 질문이 아니라 보기 강제 선택이 답이다.
+    """
+    gen = _generator()
+    calls = []
+
+    def fake_call(system, user, **kwargs):
+        calls.append(user)
+        if "[장 역할 분석 — 2차]" in user:
+            return "발표자 또는 팀 소개 — 원문 단어는 이름"
+        return "2: 불명 — 역할 파악 어려움"
+
+    monkeypatch.setattr(gen, "_call_hcx", fake_call)
+    roles = type(gen)._analyze_slide_roles_real(gen, "Slide 1: 제목\nSlide 2: 진순", ["2"], "SpeaKO")
+
+    assert roles["2"] == "발표자 또는 팀 소개 — 원문 단어는 이름 (추정)"
+    assert any("[장 역할 분석 — 2차]" in c for c in calls), "2차 객관식 질문이 안 나갔다"
+
+
+def test_second_pass_garbage_keeps_unknown(monkeypatch):
+    """2차 답이 보기 밖(장문 설명·모름)이면 버리고 '불명'을 유지한다 — 해석 금지 지시로 간다."""
+    gen = _generator()
+
+    def fake_call(system, user, **kwargs):
+        if "[장 역할 분석 — 2차]" in user:
+            return "모름이라고 답할 수밖에 없는 것이, 이 슬라이드는 " + "설명이 아주 깁니다. " * 10
+        return "2: 불명"
+
+    monkeypatch.setattr(gen, "_call_hcx", fake_call)
+    roles = type(gen)._analyze_slide_roles_real(gen, "Slide 2: 진순", ["2"], "")
+
+    assert "불명" in roles["2"]
