@@ -151,10 +151,11 @@ def test_one_failed_image_does_not_break_the_upload(tmp_path):
     slides = [(None, [(600, 400)]), (None, [(500, 400)])]
     result = _extract(tmp_path, slides, _Recorder(fail_on=(600, 400)))
 
-    # 실패한 장은 내용이 없어 목록에서 빠지고, 나머지는 정상이어야 한다.
+    # 실패한 장도 **페이지는 남는다** — 빈 내용일 뿐 목록에서 빠지면 안 된다.
+    # (예전엔 여기서 빠지는 걸 정상으로 봤는데, 그 규칙이 14장 PPT를 10장으로 만들었다. 2026-08-18)
     contents = {s["slide_number"]: s["content"] for s in result["slides"]}
     assert contents.get(2) == "이미지500x400"
-    assert 1 not in contents
+    assert contents.get(1) == ""
 
 
 def test_text_heavy_slides_skip_vision_entirely(tmp_path):
@@ -174,3 +175,70 @@ def test_deck_without_images_needs_no_vision(tmp_path):
 
     assert recorder.calls == []
     assert [s["content"] for s in result["slides"]] == ["첫 장입니다.", "둘째 장입니다."]
+
+
+# ---------------------------------------------------------------------------
+# 내용이 안 뽑힌 장도 페이지는 유지해야 한다 (2026-08-18)
+#
+# 실측: 02_이미지형.pptx 14장을 올렸더니 10장만 등록됐다. 텍스트도 없고 이미지도
+# 걸러진(장식 판정/비전 실패) 장을 추출기가 통째로 버렸기 때문이다. 사용자에게는
+# "내 PPT에서 장이 사라졌다"로 보이고, 장 번호가 밀리면 썸네일·하이라이트 좌표까지
+# 연쇄로 어긋난다. 빈 장의 대본은 생성기의 근거 없는 장 처리(_is_thin_source)가 맡는다.
+# ---------------------------------------------------------------------------
+
+
+def test_empty_slides_are_kept_with_original_numbers(tmp_path, monkeypatch):
+    """텍스트도 이미지도 없는 장이 사라지면 안 되고, 번호도 원본과 같아야 한다."""
+    path = _deck(tmp_path, [
+        ("첫 장 내용", []),
+        (None, []),              # ← 완전히 빈 장
+        ("셋째 장 내용", []),
+        (None, []),              # ← 완전히 빈 장 (마지막)
+    ])
+
+    result = PptExtractor().extract_structured_data(path)
+
+    numbers = [s["slide_number"] for s in result["slides"]]
+    assert numbers == [1, 2, 3, 4], f"장이 사라지거나 번호가 밀렸다: {numbers}"
+    by_number = {s["slide_number"]: s["content"] for s in result["slides"]}
+    assert "첫 장 내용" in by_number[1]
+    assert by_number[2] == ""
+    assert "셋째 장 내용" in by_number[3]
+    assert by_number[4] == ""
+
+
+def test_vision_failure_keeps_the_page(tmp_path, monkeypatch):
+    """이미지 인식이 전부 실패해도 그 장은 빈 내용으로 남아야 한다(장 자체가 사라지면 안 됨)."""
+    extractor = PptExtractor()
+    monkeypatch.setattr(
+        extractor.image_text_extractor, "extract_text_from_image",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("vision down")))
+    path = _deck(tmp_path, [
+        ("첫 장 내용", []),
+        (None, [(800, 600)]),    # ← 이미지뿐인데 인식이 죽는 장
+    ])
+
+    result = extractor.extract_structured_data(path)
+
+    numbers = [s["slide_number"] for s in result["slides"]]
+    assert numbers == [1, 2], f"인식 실패한 장이 사라졌다: {numbers}"
+    assert result["slides"][1]["content"] == ""
+
+
+def test_pdf_empty_pages_are_kept(tmp_path):
+    """PDF도 같은 규칙 — 빈 페이지를 버리면 장수가 어긋난다."""
+    import pypdf
+    from utils import pdf_extractor
+
+    writer = pypdf.PdfWriter()
+    for _ in range(3):
+        writer.add_blank_page(width=720, height=540)   # 텍스트 없는 페이지 3장
+    path = tmp_path / "empty.pdf"
+    with open(path, "wb") as f:
+        writer.write(f)
+
+    result = pdf_extractor.extract_structured_data(str(path))
+
+    numbers = [s["slide_number"] for s in result["slides"]]
+    assert numbers == [1, 2, 3], f"빈 페이지가 사라졌다: {numbers}"
+    assert all(s["content"] == "" for s in result["slides"])

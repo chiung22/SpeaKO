@@ -144,13 +144,17 @@ class PptExtractor:
 
                 slide_content = "\n".join(slide_texts)
 
-                # [요구사항 5 반영] 슬라이드별 텍스트가 존재하는 경우에만 객체로 분리하여 추가
-                if slide_content.strip():
-                    slides_data.append({
-                        "slide_number": i + 1,
-                        "content": slide_content
-                    })
+                # 내용이 안 뽑힌 장도 **버리지 않고 빈 내용으로 유지한다.**
+                # 예전엔 여기서 걸러냈는데, 그러면 원본 14장이 10장으로 줄어 사용자는
+                # "내 PPT에서 장이 사라졌다"를 보게 된다(실측: 02_이미지형.pptx 14장 → 10장).
+                # 장 번호가 원본과 밀리면 썸네일·하이라이트 좌표까지 연쇄로 어긋난다.
+                # 빈 장의 대본은 생성기의 근거 없는 장 처리(_is_thin_source)가 짧게 맡는다.
+                slides_data.append({
+                    "slide_number": i + 1,
+                    "content": slide_content
+                })
 
+                if slide_content.strip():
                     all_slide_texts.extend(slide_texts)
 
                     # 주제 및 목차 탐지를 위해 초반 1~3장 텍스트는 별도로도 수집

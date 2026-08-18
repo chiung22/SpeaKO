@@ -11,10 +11,12 @@ def extract_structured_data(file_path: str) -> dict:
     slides = []
     for i, page in enumerate(reader.pages):
         text = (page.extract_text() or "").strip()
-        if text:
-            slides.append({"slide_number": i + 1, "content": text})
+        # 텍스트가 안 뽑힌 페이지도 버리지 않는다 — 버리면 원본과 장수가 어긋나
+        # 사용자에겐 "장이 사라졌다"로 보인다 (ppt_extractor와 같은 이유. 2026-08-18).
+        slides.append({"slide_number": i + 1, "content": text})
 
-    topic = slides[0]["content"].splitlines()[0][:100] if slides else ""
+    first_with_text = next((s["content"] for s in slides if s["content"]), "")
+    topic = first_with_text.splitlines()[0][:100] if first_with_text else ""
     return {"metadata": {"topic": topic, "keywords": []}, "slides": slides}
 
 

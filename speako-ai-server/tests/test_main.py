@@ -119,7 +119,9 @@ class _FakePdfPage:
 
 class _FakePdfReader:
     def __init__(self, *_args, **_kwargs):
-        # 두 번째 페이지는 텍스트가 없는 캡처 슬라이드를 흉내낸다 — 결과에서 제외되어야 한다.
+        # 두 번째 페이지는 텍스트가 없는 캡처 슬라이드를 흉내낸다.
+        # 예전엔 결과에서 제외했지만, 그 규칙이 14장 PPT를 10장으로 만들었다(2026-08-18) —
+        # 이제 빈 페이지도 번호를 지키며 빈 내용으로 유지된다.
         self.pages = [_FakePdfPage("첫 페이지 내용입니다"), _FakePdfPage("")]
 
 
@@ -160,8 +162,10 @@ def test_create_project_from_pdf_persists_slides(monkeypatch, db_session_factory
     db = db_session_factory()
     try:
         project = db.get(models.Project, project_id)
-        assert len(project.slides) == 1  # 빈 텍스트 페이지는 제외됨
+        assert len(project.slides) == 2  # 빈 페이지도 페이지는 유지된다
         assert project.slides[0].source_content == "첫 페이지 내용입니다"
+        assert project.slides[1].slide_number == 2
+        assert project.slides[1].source_content == ""
     finally:
         db.close()
 
