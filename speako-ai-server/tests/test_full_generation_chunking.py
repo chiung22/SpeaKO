@@ -508,3 +508,36 @@ def test_screen_pointing_sentence_is_not_stripped():
 
     keep = "화면의 내용을 함께 봐주시기 바랍니다."
     assert _strip_closing_greeting(keep) == keep
+
+
+def test_middle_slide_leading_greeting_is_stripped():
+    """중간 장의 '안녕하세요, 여러분.' 시작 — 프롬프트 금지로도 재발해 코드로 지운다(2026-08-19 실측: 12장)."""
+    from clova.full_generation.generator import _strip_leading_greeting
+
+    assert _strip_leading_greeting(
+        "안녕하세요, 여러분. 오늘은 저희가 기획한 서비스에 대해 설명드리겠습니다."
+    ) == "오늘은 저희가 기획한 서비스에 대해 설명드리겠습니다."
+    assert _strip_leading_greeting("안녕하십니까. 본론입니다.") == "본론입니다."
+    # 본문 중간의 인사말·인사 아닌 문장은 건드리지 않는다.
+    assert _strip_leading_greeting("발표 첫머리에 안녕하세요라고 인사합니다.") == \
+        "발표 첫머리에 안녕하세요라고 인사합니다."
+    # 인사뿐이면 원문 유지(빈 대본 방지).
+    assert _strip_leading_greeting("안녕하세요.") == "안녕하세요."
+
+
+def test_empty_slide_leak_is_replaced_with_pointing_sentence():
+    """빈 장 대본이 '내용을 확인할 수 없습니다'라고 청중에게 말하면 발표 사고다.
+
+    금지 지시(274eda7)로도 재발해서(2026-08-19 실측: 13장 "내용을 확인할 수 없습니다.
+    양해를 부탁드리며…") 코드에서 화면 안내 한 문장으로 통째로 교체한다.
+    """
+    from clova.full_generation.generator import _replace_leaked_empty_script
+
+    leaked = "보시는 바와 같이, 이번 슬라이드에는 내용을 확인할 수 없습니다. 양해를 부탁드립니다."
+    replaced = _replace_leaked_empty_script(leaked, 13)
+    assert "확인할 수 없" not in replaced and "양해" not in replaced
+    assert replaced.endswith(("바랍니다.", "살펴보겠습니다.", "보시죠."))
+
+    # 정상적인 화면 안내는 그대로 둔다.
+    ok = "화면의 내용을 함께 봐주시기 바랍니다."
+    assert _replace_leaked_empty_script(ok, 3) == ok

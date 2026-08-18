@@ -179,6 +179,42 @@ def _strip_leading_closing(script):
     return stripped if stripped else script
 
 
+# 중간 슬라이드 첫머리의 여는 인사("안녕하세요, 여러분. 오늘은 …"). 프롬프트로 금지해도
+# 재발한다(실측 2026-08-19: 12장이 "안녕하세요, 여러분."으로 시작). 인사만 벗기고 본문은 살린다.
+_LEADING_GREETING_PATTERN = re.compile(
+    r"^\s*(?:안녕하세요|안녕하십니까|반갑습니다)[,.!]?\s*(?:여러분[,.!]?\s*)?"
+)
+
+
+def _strip_leading_greeting(script):
+    """중간 슬라이드 첫머리의 여는 인사를 제거한다. 인사뿐이면 원문을 유지한다."""
+    if not script:
+        return script
+    stripped = _LEADING_GREETING_PATTERN.sub("", script, count=1).strip()
+    return stripped if stripped else script
+
+
+# 빈 장(원문 0자) 대본에서 지시문의 사정 설명이 대사로 새는 경우.
+# "한 문장만, 단정 금지"까지는 프롬프트가 지키게 만들었지만, "내용을 확인할 수 없습니다.
+# 양해 부탁드립니다"처럼 **상황 자체를 청중에게 말해버리는 것**은 금지 지시(274eda7)로도
+# 재발했다(실측 2026-08-19). 여기는 지시가 아니라 코드로 끝낸다.
+_EMPTY_LEAK_PATTERN = re.compile(r"내용[을이]?\s*(?:확인할 수 없|없습니다|찾을 수 없)|양해")
+
+# _thin_source_instruction의 화면 안내 예시와 같은 결의 대체 문장 (장 번호로 순환)
+_EMPTY_FALLBACK_SCRIPTS = (
+    "화면의 내용을 함께 봐주시기 바랍니다.",
+    "지금 보시는 화면을 함께 살펴보겠습니다.",
+    "이 슬라이드는 화면으로 직접 확인해 보시죠.",
+)
+
+
+def _replace_leaked_empty_script(script, slide_number):
+    """빈 장 대본이 '내용이 없다'는 사정을 말하면 화면 안내 한 문장으로 통째로 교체한다."""
+    if script and _EMPTY_LEAK_PATTERN.search(script):
+        return _EMPTY_FALLBACK_SCRIPTS[(int(slide_number) - 1) % len(_EMPTY_FALLBACK_SCRIPTS)]
+    return script
+
+
 # 발표자 이름이 자료에 없을 때 모델이 채워 넣는 자리표시자.
 # clova/styles.py의 FIRST_SLIDE_INSTRUCTION이 이미 "'OOO'나 '홍길동'을 쓰지 말라"고 못박고 있는데도
 # 모델이 그대로 어긴다(실측: 4개 발표 중 2개의 첫 장이 각각 "홍길동입니다", "발표자 OOO입니다").
@@ -274,6 +310,7 @@ class FullScriptGenerator:
             slides = self._request_one_slide(
                 number, block, _position_label(index, len(blocks)), per_slide_time, style, extra_requirement, audience, topic,
                 is_last=(index == len(blocks) - 1),
+                is_first=(index == 0),
             )
             return number, slides
 
@@ -307,7 +344,7 @@ class FullScriptGenerator:
             "thin_source_slide_numbers": thin,
         }
 
-    def _request_one_slide(self, slide_number, block, position, presentation_time, style, extra_requirement, audience="", topic="", is_last=True):
+    def _request_one_slide(self, slide_number, block, position, presentation_time, style, extra_requirement, audience="", topic="", is_last=True, is_first=False):
         """
         한 장만 요청할 때는 **TOON 포맷을 쓰지 않는다.**
         응답 전체가 곧 이 슬라이드의 대본이므로 구분자가 필요 없고, 오히려 껍데기를 요구하면
@@ -330,8 +367,14 @@ class FullScriptGenerator:
                 if not is_last:
                     script = _strip_closing_greeting(script)
                     script = _strip_leading_closing(script)
+                    # 첫 장이 아닌데 "안녕하세요"로 시작하는 것도 같은 이유로 코드에서 지운다.
+                    if not is_first:
+                        script = _strip_leading_greeting(script)
                 # 자료에 없는 발표자 이름("홍길동입니다")도 같은 이유로 코드에서 지운다.
                 script = _strip_placeholder_name(script)
+                # 빈 장 대본이 "내용이 없다"는 사정을 대사로 말하면 화면 안내 한 문장으로 교체
+                if _is_empty_source(block):
+                    script = _replace_leaked_empty_script(script, slide_number)
                 return [{"slide_number": slide_number, "script": script}]
             if attempt == 0:
                 print(f"  ↻ 슬라이드 {slide_number} 응답이 비어 한 번 더 시도합니다.")
