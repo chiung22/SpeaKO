@@ -543,22 +543,55 @@ def test_empty_slide_leak_is_replaced_with_pointing_sentence():
     assert _replace_leaked_empty_script(ok, 3) == ok
 
 
-def test_name_only_slide_is_treated_as_person_intro():
-    """원문이 이름 한 단어("진순")뿐인 장을 기능 설명으로 지어내면 안 된다.
+def test_role_hint_overrides_generic_thin_instruction():
+    """분석이 준 역할이 있으면 thin 지시 대신 역할 기반 지시를 쓴다.
 
-    실측(2026-08-19): "핵심 기능인 진순입니다"라고 지어냈고, PPT 주인은
-    "저는 SpeaKO 발표를 맡은 진순입니다"를 원했다. 초반 장은 발표자 소개로 유도한다.
+    이름 정규식 하드코딩("한글 2~4자=이름") 대신 덱 전체 분석으로 판단한다 —
+    사용자 피드백(2026-08-19): "하드코딩보다 분석을 그런 식으로".
     """
     from clova.full_generation.generator import _thin_source_instruction
 
-    early = _thin_source_instruction(2, "Slide 2: 진순")
-    assert "진순" in early and "발표자 소개" in early and "맡은 진순입니다" in early
-    assert "단정하면 안" in early
+    hinted = _thin_source_instruction(2, "Slide 2: 진순", role_hint="발표자 자기소개 — '진순'은 발표자 이름")
+    assert "발표자 자기소개" in hinted and "지어내지 마세요" in hinted
 
-    # 후반 장은 발표자라고 못 박지 않는다 (팀원·페르소나일 수 있음).
-    late = _thin_source_instruction(9, "Slide 9: 진순")
-    assert "인물(또는 팀·캐릭터)" in late and "맡은 진순입니다" not in late
-
-    # 이름이 아닌 제목("기술 스택")은 기존 thin 지시 그대로.
+    # 역할이 없으면 기존 thin 지시 그대로.
     normal = _thin_source_instruction(2, "Slide 2: 서비스 기술 스택")
     assert "2~3문장" in normal
+
+
+def test_role_analysis_parses_roles_and_drops_unknown(monkeypatch):
+    """분석 응답("번호: 역할")을 dict로 읽고, '불명'과 목록 밖 번호는 버린다."""
+    gen = _generator()
+    monkeypatch.setattr(gen, "_call_hcx", lambda system, user:
+        "2: 발표자 자기소개 — '진순'은 발표자 이름\n3: 불명\n9: 목록에 없는 장")
+
+    roles = type(gen)._analyze_slide_roles_real(gen, "Slide 2: 진순\nSlide 3: ", ["2", "3"], "SpeaKO")
+
+    assert roles == {"2": "발표자 자기소개 — '진순'은 발표자 이름"}
+
+
+def test_role_hint_reaches_the_slide_prompt(monkeypatch):
+    """분석이 판단한 역할이 그 장의 생성 프롬프트에 실려야 한다 — 하드코딩 규칙의 대체물이다."""
+    from clova.full_generation.generator import FullScriptGenerator
+    monkeypatch.setattr(FullScriptGenerator, "_analyze_slide_roles",
+                        lambda self, *a, **k: {"2": "발표자 자기소개 — '진순'은 발표자 이름"})
+
+    sent = _stub_hcx(monkeypatch, lambda p: "대본입니다.")
+    _generator().generate_full_script("Slide 1: " + "충분히 긴 첫 장 원문입니다. " * 3 + "\nSlide 2: 진순", 4, "격식체")
+
+    second = next(p for p in sent if "진순" in p.split("[PPT 텍스트]")[1])
+    assert "발표자 자기소개" in second, "역할 힌트가 프롬프트에 실리지 않았다"
+    first = next(p for p in sent if "첫 장 원문" in p.split("[PPT 텍스트]")[1])
+    assert "발표자 자기소개" not in first, "다른 장 프롬프트로 힌트가 샜다"
+
+
+def test_role_analysis_failure_falls_back_to_generic_thin(monkeypatch):
+    """분석이 죽어도 생성은 일반 thin 지시로 계속돼야 한다."""
+    from clova.full_generation.generator import FullScriptGenerator
+    monkeypatch.setattr(FullScriptGenerator, "_analyze_slide_roles",
+                        lambda self, *a, **k: (_ for _ in ()).throw(RuntimeError("분석 죽음")))
+
+    _stub_hcx(monkeypatch, lambda p: "대본입니다.")
+    result = _generator().generate_full_script(_ppt_text(2), 4, "격식체")
+
+    assert [s["slide_number"] for s in result["slides"]] == ["1", "2"]

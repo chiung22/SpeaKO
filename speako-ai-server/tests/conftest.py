@@ -114,3 +114,15 @@ class _SyncExecutor:
         except Exception as exc:  # 실제 executor와 동일하게 예외를 Future에 담는다
             future.set_exception(exc)
         return future
+
+
+@pytest.fixture(autouse=True)
+def _disable_role_analysis(monkeypatch):
+    """장 역할 분석(HCX 1회)은 대부분의 생성 테스트와 무관한데, 켜두면 모든 테스트의
+    호출 수가 1씩 밀리고 분석 프롬프트(덱 전체 포함)가 "요청엔 한 장만" 검증을 깨뜨린다.
+    기본은 끄고, 분석 자체를 검증하는 테스트만 원본을 되살려 쓴다(_real이 원본)."""
+    from clova.full_generation.generator import FullScriptGenerator
+    if not hasattr(FullScriptGenerator, "_analyze_slide_roles_real"):
+        FullScriptGenerator._analyze_slide_roles_real = FullScriptGenerator._analyze_slide_roles
+    monkeypatch.setattr(FullScriptGenerator, "_analyze_slide_roles",
+                        lambda self, *a, **k: {})

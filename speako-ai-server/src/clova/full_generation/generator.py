@@ -93,24 +93,30 @@ def _is_empty_source(block):
     return not re.sub(r"\s+", "", body)
 
 
-# 원문이 한글 2~4자 단어 하나뿐이면 사람 이름일 가능성이 크다.
-# 실측(2026-08-19): 발표자 닉네임 "진순"만 읽힌 장을 모델이 "핵심 기능인 진순"으로
-# 단정해 기능 설명을 지어냈다 — PPT 주인은 "저는 SpeaKO 발표를 맡은 진순입니다"를 원했다.
-_NAME_LIKE = re.compile(r"^[가-힣]{2,4}$")
-
-
-def _name_like_source(block):
-    """라벨을 뗀 원문이 이름 같은 단어 하나뿐이면 그 단어를, 아니면 None을 돌려준다."""
-    body = _SOURCE_LABELS.sub(" ", block or "").strip()
-    return body if _NAME_LIKE.match(body) else None
+# 장 역할 분석 결과("번호: 역할 한 줄")를 읽는 패턴. 분석 프롬프트는 아래
+# FullScriptGenerator._analyze_slide_roles 참고.
+_ROLE_LINE = re.compile(r"^\s*(\d+)\s*[:：]\s*(.+?)\s*$", re.MULTILINE)
 
 
 # 비전이 글자는 못 읽고 장면 설명만 얻은 장의 표식 (ppt_extractor 3차 라운드가 붙인다).
 _SCENE_LABEL = "[화면 묘사]"
 
 
-def _thin_source_instruction(slide_number, block=None):
+def _thin_source_instruction(slide_number, block=None, role_hint=None):
     pointing = _THIN_POINTING_EXAMPLES[(int(slide_number) - 1) % len(_THIN_POINTING_EXAMPLES)]
+
+    # 덱 전체 분석(_analyze_slide_roles)이 이 장의 역할을 판단해줬으면 그걸 최우선으로 쓴다.
+    # 장별 독립 생성이라 모델은 덱 맥락을 모른다 — "진순"이 발표자 이름인 건 다른 장들과
+    # 함께 봐야 알 수 있다(실측 2026-08-19: 맥락 없이 "핵심 기능인 진순"으로 단정).
+    if role_hint:
+        return (
+            f"이 슬라이드는 원문이 빈약하지만, 덱 전체를 분석한 결과 이 장의 역할은 "
+            f"'{role_hint}'입니다. 이 역할에 맞는 대본을 한두 문장으로만 쓰세요. "
+            "역할 설명 문구를 그대로 낭독하지 말고 자연스러운 발표 말로 바꾸세요. "
+            "원문과 역할에 없는 기능·숫자·이름을 지어내지 마세요. "
+            f"필요하면 {pointing}처럼 화면을 가리키는 표현을 써도 됩니다. "
+            "청중에게 던지는 질문으로 시작하지 마세요."
+        )
 
     # 글자 대신 장면 설명만 있는 장: 묘사를 "장의 역할" 힌트로만 쓰게 한다.
     # 묘사를 내용처럼 단정하면 과거 환각 사고가 재발한다(비전이 화면을 설명한 문장이
@@ -138,22 +144,6 @@ def _thin_source_instruction(slide_number, block=None):
             "청중에게 던지는 질문으로 시작하지도 마세요. "
             "⚠️ '이 슬라이드에는 내용이 없습니다', '내용을 확인할 수 없습니다' 같은 말을 "
             "청중에게 하면 안 됩니다 — 그건 지금 당신에게 주는 사정 설명이지 발표 대사가 아닙니다."
-        )
-
-    # 이름 같은 단어 하나뿐인 장: 기능·제품으로 단정하는 걸 막고 인물 소개로 유도한다.
-    name = _name_like_source(block) if block is not None else None
-    if name:
-        early = int(slide_number) <= 3
-        role_hint = (
-            "발표 초반 장이므로 발표자 소개일 가능성이 큽니다. "
-            f"'저는 이번 발표를 맡은 {name}입니다.'처럼 " if early
-            else f"'{name}'라는 인물(또는 팀·캐릭터)을 소개하는 "
-        )
-        return (
-            f"이 슬라이드의 원문은 '{name}' 한 단어뿐입니다 — 사람(발표자·팀원·캐릭터) "
-            f"이름일 가능성이 큽니다. {role_hint}짧은 소개 한두 문장만 쓰세요. "
-            f"'{name}'를 기능·제품·서비스·로고로 단정하면 안 됩니다. "
-            "원문에 없는 설명을 덧붙이지 말고, 두 문장을 넘기지 마세요."
         )
 
     return (
@@ -351,6 +341,19 @@ class FullScriptGenerator:
 
         per_slide_time = max(1, round(presentation_time / len(blocks)))
 
+        # 근거 없이 만든 슬라이드를 사용자에게 알려주기 위해 미리 표시해둔다(아래 반환값 주석 참고).
+        thin = [number for number, block in blocks if _is_thin_source(block)]
+
+        # ── 분석 패스: 빈약한 장들의 "역할"을 덱 전체 맥락으로 한 번에 판단한다.
+        # 장별 독립 생성은 맥락이 없어서 "진순"(발표자 이름)을 기능으로 단정했다(2026-08-19).
+        # 규칙 하드코딩 대신 모델이 덱 전체를 보고 판단하게 한다 — 호출은 덱당 1회다.
+        roles = {}
+        if thin:
+            try:
+                roles = self._analyze_slide_roles(ppt_text, thin, topic)
+            except Exception as err:
+                print(f"⚠️ 장 역할 분석 실패(일반 지시로 진행): {err}")
+
         # 슬라이드별 호출은 서로 독립적이라(각 장은 자기 내용 + 위치만 씀) 동시에 부른다.
         # 순서는 결과를 슬라이드 번호로 정렬해 맞추므로 완료 순서가 뒤섞여도 문제없다.
         def build_one(item):
@@ -359,13 +362,12 @@ class FullScriptGenerator:
                 number, block, _position_label(index, len(blocks)), per_slide_time, style, extra_requirement, audience, topic,
                 is_last=(index == len(blocks) - 1),
                 is_first=(index == 0),
+                role_hint=roles.get(str(int(number))),
             )
             return number, slides
 
         all_slides = []
         missing = []
-        # 근거 없이 만든 슬라이드를 사용자에게 알려주기 위해 미리 표시해둔다(아래 반환값 주석 참고).
-        thin = [number for number, block in blocks if _is_thin_source(block)]
         workers = min(MAX_CONCURRENT_REQUESTS, len(blocks))
         with ThreadPoolExecutor(max_workers=workers) as pool:
             for number, slides in pool.map(build_one, enumerate(blocks)):
@@ -392,7 +394,43 @@ class FullScriptGenerator:
             "thin_source_slide_numbers": thin,
         }
 
-    def _request_one_slide(self, slide_number, block, position, presentation_time, style, extra_requirement, audience="", topic="", is_last=True, is_first=False):
+    def _analyze_slide_roles(self, ppt_text, thin_numbers, topic=""):
+        """빈약한 장들의 역할을 덱 전체 맥락으로 판단한다. {장번호(str): 역할 한 줄}.
+
+        왜 덱 전체를 주나: "진순" 한 단어가 발표자 이름인지 기능명인지는 그 장만 봐서는
+        알 수 없다 — 표지·마지막 장·다른 장들의 내용과 함께 봐야 한다. 호출은 덱당 1회.
+        실패하면 빈 dict — 생성은 일반 thin 지시로 진행되므로 분석이 죽어도 대본은 나온다.
+        """
+        numbers = ", ".join(str(int(n)) for n in thin_numbers)
+        user_prompt = (
+            "[장 역할 분석]\n"
+            f"발표 주제: {topic or '(미상)'}\n\n"
+            "아래는 발표 자료의 장별 원문입니다.\n\n"
+            f"{ppt_text}\n\n"
+            f"원문이 빈약한 장: {numbers}\n\n"
+            "위 장들 각각이 발표에서 어떤 역할의 장인지, 덱 전체 맥락으로 판단해주세요. "
+            "원문이 사람 이름으로 보이면 누구인지(발표자·팀원·고객 페르소나·캐릭터)까지. "
+            "확실하지 않으면 '불명'이라고 쓰세요 — 추측으로 기능·제품이라 단정하지 마세요.\n"
+            "출력은 설명 없이 아래 형식의 줄만:\n"
+            "장번호: 역할 한 줄\n"
+            "예) 2: 발표자 자기소개 — '진순'은 발표자 이름"
+        )
+        text = self._call_hcx(
+            "너는 발표 자료 분석가다. 장별 원문을 보고 각 장의 역할을 판단한다. "
+            "지시된 출력 형식 외의 말은 하지 않는다.",
+            user_prompt,
+        )
+        roles = {}
+        for match in _ROLE_LINE.finditer(text or ""):
+            number, role = match.group(1), match.group(2).strip()
+            # '불명'은 힌트가 아니다 — 넣으면 대본에 "역할이 불명확한 장입니다"가 나온다.
+            if role and "불명" not in role and str(int(number)) in {str(int(n)) for n in thin_numbers}:
+                roles[str(int(number))] = role[:80]
+        if roles:
+            print(f"🧭 장 역할 분석: {roles}")
+        return roles
+
+    def _request_one_slide(self, slide_number, block, position, presentation_time, style, extra_requirement, audience="", topic="", is_last=True, is_first=False, role_hint=None):
         """
         한 장만 요청할 때는 **TOON 포맷을 쓰지 않는다.**
         응답 전체가 곧 이 슬라이드의 대본이므로 구분자가 필요 없고, 오히려 껍데기를 요구하면
@@ -405,7 +443,7 @@ class FullScriptGenerator:
         # 장면 묘사는 30자를 넘어 thin 판정을 안 탈 수 있으므로 라벨로도 명시 분기한다 —
         # 일반 지시("원문만 근거로")로 새면 모델이 묘사를 슬라이드 내용처럼 읽는다.
         needs_guard = _is_thin_source(block) or _SCENE_LABEL in (block or "")
-        evidence = _thin_source_instruction(slide_number, block) if needs_guard else _NORMAL_SOURCE_INSTRUCTION
+        evidence = _thin_source_instruction(slide_number, block, role_hint) if needs_guard else _NORMAL_SOURCE_INSTRUCTION
 
         for attempt in range(2):
             text = self._call_hcx(
