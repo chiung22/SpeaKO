@@ -645,3 +645,15 @@ def test_second_pass_garbage_keeps_unknown(monkeypatch):
     roles = type(gen)._analyze_slide_roles_real(gen, "Slide 2: 진순", ["2"], "")
 
     assert "불명" in roles["2"]
+
+
+def test_role_hint_forbids_asserting_headcount():
+    """이름이 여러 개일 때 '두 사람'으로 단정하면 안 된다.
+
+    실측(2026-08-19): 소개 장 원문 "진순 / 이화진"(동일 인물의 별명·본명)을 보고
+    "제 옆에는 이화진 님이 함께하고 있습니다"라고 두 사람으로 서술했다.
+    """
+    from clova.full_generation.generator import _thin_source_instruction
+
+    hinted = _thin_source_instruction(2, "Slide 2: 진순 이화진", role_hint="발표자 자기소개")
+    assert "인원수" in hinted and "단정" in hinted
