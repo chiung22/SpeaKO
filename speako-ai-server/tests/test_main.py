@@ -1257,3 +1257,39 @@ def test_script_job_reports_missing_slides(monkeypatch, db_session_factory):
     body = _generate_full_and_wait({"project_id": project_id, "presentation_time": 2, "style": "격식체"})
     assert body["status"] == "completed"
     assert body["data"]["missing_slide_numbers"] == ["2"]
+
+
+def test_partial_regen_strips_misplaced_closings(monkeypatch, db_session_factory):
+    """중간 장을 부분 재생성해도 '감사합니다'·'주목해 주세요'가 붙으면 안 된다.
+
+    실측(2026-08-19): 2장 재생성 결과가 "…주목해 주시기를 바랍니다. 감사합니다."로
+    끝났다 — 전체 생성의 위치별 정리가 부분 재생성 경로에는 없었다.
+    """
+    from db import models as m
+
+    db = db_session_factory()
+    try:
+        project = m.Project(name="부분정리", filename="d.pptx", topic="주제", keywords=[])
+        project.slides = [
+            m.Slide(slide_number=1, source_content="원문1", script="첫 장 대본입니다."),
+            m.Slide(slide_number=2, source_content="원문2", script="둘째 장 대본입니다."),
+            m.Slide(slide_number=3, source_content="원문3", script="셋째 장 대본입니다."),
+        ]
+        db.add(project); db.commit(); pid = project.id
+    finally:
+        db.close()
+
+    monkeypatch.setattr(main.partial_generator, "generate_partial_script",
+        lambda *a, **k: {"script": "안녕하세요. 핵심 내용입니다. 계속해서 주목해 주세요. 감사합니다."})
+
+    res = client.post("/api/script/partial",
+                      json={"project_id": pid, "target_slide": 2, "style": "formal"})
+
+    assert res.status_code == 200, res.text
+    script = res.json()["data"]["script"]
+    assert script == "핵심 내용입니다.", script   # 시작 인사·주목·감사 전부 제거
+
+    # 마지막 장은 마무리를 남긴다.
+    res_last = client.post("/api/script/partial",
+                           json={"project_id": pid, "target_slide": 3, "style": "formal"})
+    assert "감사합니다" in res_last.json()["data"]["script"]

@@ -27,6 +27,7 @@ from urllib.parse import quote
 
 # 1. 분리해둔 AI 클라이언트 모듈들 임포트
 from clova.full_generation.generator import FullScriptGenerator
+from clova.full_generation import generator as script_cleanup
 from clova.partial_generation.generator import PartialScriptGenerator
 from clova.feedback.generator import (
     PronunciationFeedbackGenerator,
@@ -818,6 +819,19 @@ async def create_partial_script(request: PartialScriptRequest, db: Session = Dep
 
     if not result or "script" not in result:
         raise HTTPException(status_code=502, detail="대본 부분 재생성에 실패했습니다.")
+
+    # 전체 생성이 쓰는 위치별 정리를 부분 재생성에도 똑같이 적용한다.
+    # 안 하면 중간 장을 재생성할 때마다 "감사합니다"·"주목해 주세요"류가 되살아난다
+    # (실측 2026-08-19: 2장 재생성 결과가 "…주목해 주시기를 바랍니다. 감사합니다."로 끝남).
+    last_number = max((s.slide_number for s in project.slides), default=request.target_slide)
+    if request.target_slide != last_number:
+        script = result["script"]
+        script = script_cleanup.strip_closing_greeting(script)
+        script = script_cleanup.strip_leading_closing(script)
+        script = script_cleanup.strip_transition_ending(script)
+        if request.target_slide != min((s.slide_number for s in project.slides), default=1):
+            script = script_cleanup.strip_leading_greeting(script)
+        result["script"] = script
 
     target_slide.script = result["script"]
     db.commit()

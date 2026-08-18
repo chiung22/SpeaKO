@@ -293,6 +293,14 @@ def _replace_leaked_empty_script(script, slide_number):
     return script
 
 
+# 부분 재생성(main.py)도 같은 정리를 써야 해서 공개 이름을 둔다 — 전체 생성과 규칙이 갈리면
+# "재생성했더니 감사합니다가 되살아난다"가 된다.
+strip_closing_greeting = _strip_closing_greeting
+strip_leading_closing = _strip_leading_closing
+strip_leading_greeting = _strip_leading_greeting
+strip_transition_ending = _strip_transition_ending
+
+
 # 발표자 이름이 자료에 없을 때 모델이 채워 넣는 자리표시자.
 # clova/styles.py의 FIRST_SLIDE_INSTRUCTION이 이미 "'OOO'나 '홍길동'을 쓰지 말라"고 못박고 있는데도
 # 모델이 그대로 어긴다(실측: 4개 발표 중 2개의 첫 장이 각각 "홍길동입니다", "발표자 OOO입니다").
