@@ -415,3 +415,50 @@ def test_claude_ocr_skipped_without_key(tmp_path):
 
     assert calls == []
     assert result["slides"][0]["content"].startswith("[화면 묘사]")
+
+
+def test_claude_reads_tiny_name_tags_on_thin_slides(tmp_path):
+    """이름표(75×36 '이화진')는 HCX 크기 필터에 걸러지고, HCX는 읽혀도 오독한다("0호점").
+
+    빈약한 장(<30자)에서는 ① HCX가 못 읽은 이미지 + ② 크기 미달로 걸러졌던 초소형
+    이미지를 Claude가 읽어야 한다. HCX가 이미 읽은 이미지는 다시 읽지 않는다(비용).
+    """
+    claude_reads = []
+
+    class _FakeClaude:
+        use_fallback = False
+        def extract_text_from_image(self, blob, content_type):
+            import io as _io
+            from PIL import Image as _Image
+            size = _Image.open(_io.BytesIO(blob)).size
+            claude_reads.append(size)
+            return "이화진" if size == (80, 40) else ""
+
+    extractor = PptExtractor()
+    extractor.image_text_extractor = _Recorder()      # HCX는 600x400만 읽음("이미지600x400")
+    extractor.claude_ocr = _FakeClaude()
+    result = extractor.extract_structured_data(
+        _deck(tmp_path, [(None, [(600, 400), (80, 40)])]))
+
+    content = result["slides"][0]["content"]
+    assert "이미지600x400" in content and "이화진" in content, content
+    assert (600, 400) not in claude_reads, "HCX가 이미 읽은 이미지를 Claude가 또 읽었다"
+    assert (80, 40) in claude_reads
+
+
+def test_claude_skips_slides_with_enough_text(tmp_path):
+    """글자가 충분한 장(≥30자)은 Claude를 부르지 않는다 — 폴백은 빈약한 장 전용이다."""
+    calls = []
+
+    class _FakeClaude:
+        use_fallback = False
+        def extract_text_from_image(self, blob, content_type):
+            calls.append(1); return "X"
+
+    extractor = PptExtractor()
+    extractor.image_text_extractor = _Recorder()
+    extractor.claude_ocr = _FakeClaude()
+    long_text = "이 슬라이드에는 충분히 긴 설명이 이미 텍스트로 들어 있습니다."
+    extractor.extract_structured_data(_deck(tmp_path, [(long_text, [(600, 400), (80, 40)])]))
+
+    assert calls == []

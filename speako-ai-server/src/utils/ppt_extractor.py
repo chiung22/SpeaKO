@@ -44,6 +44,15 @@ _OCR_SKIP_TEXT_LENGTH = 50
 #    올릴수록 빨라지는 구간이 아니다. 게다가 대본 생성과 같은 HCX 할당량을 나눠 쓰므로,
 #    여기서 429를 많이 만들면 대본 생성까지 느려진다. 조절이 필요하면 환경변수로 연다.
 _VISION_CONCURRENCY = max(1, int(os.getenv("VISION_MAX_CONCURRENCY", "2")))
+# Claude OCR 전용 추가 후보의 하한. HCX용 기준(150×100)에 걸러진 초소형 이미지에도
+# 이름표("이화진", 75×36)가 들어 있다(실측 2026-08-19). HCX는 이 크기를 "0호점"으로
+# 오독하므로 HCX에는 안 보내고, 켜져 있다면 Claude에만 보낸다.
+_MIN_CLAUDE_IMAGE_WIDTH = 40
+_MIN_CLAUDE_IMAGE_HEIGHT = 24
+# 슬라이드에서 긁은 글자가 이 수 미만이면 "빈약한 장"으로 보고 Claude 폴백 대상에 넣는다
+# (generator.THIN_SOURCE_CHARS와 같은 기준).
+_THIN_TEXT_CHARS = 30
+
 # 같은 이미지가 이 수 이상의 슬라이드에 반복되면 템플릿 장식(배경·배너·로고)으로 본다.
 #
 # 왜 필요한가(실측 2026-08-18, 이미지형 14장): 모든 장에 깔린 1761×773 배경과 963×132
@@ -90,6 +99,7 @@ class PptExtractor:
             for slide in prs.slides:
                 slide_texts = []
                 ocr_candidates = []
+                small_candidates = []   # Claude 전용 (HCX 크기 기준 미달인 이름표류)
                 seen_in_slide = set()
                 for shape in slide.shapes:
                     if hasattr(shape, "text") and shape.text.strip():
@@ -103,10 +113,14 @@ class PptExtractor:
                             blob = image.blob
                         except Exception:
                             continue
-                        if width_px < _MIN_OCR_IMAGE_WIDTH or height_px < _MIN_OCR_IMAGE_HEIGHT:
-                            continue
                         aspect_ratio = max(width_px, height_px) / max(1, min(width_px, height_px))
-                        if aspect_ratio > _MAX_OCR_ASPECT_RATIO:
+                        if width_px < _MIN_OCR_IMAGE_WIDTH or height_px < _MIN_OCR_IMAGE_HEIGHT \
+                                or aspect_ratio > _MAX_OCR_ASPECT_RATIO:
+                            # HCX 기준엔 못 미치지만 이름표 크기는 되는 이미지 — Claude 전용 후보.
+                            if (width_px >= _MIN_CLAUDE_IMAGE_WIDTH
+                                    and height_px >= _MIN_CLAUDE_IMAGE_HEIGHT
+                                    and aspect_ratio <= 12):
+                                small_candidates.append((blob, image.content_type))
                             continue
                         digest = hashlib.sha1(blob).hexdigest()
                         # 같은 슬라이드에 같은 이미지가 두 번 있어도 슬라이드 수는 1로 센다.
@@ -116,7 +130,8 @@ class PptExtractor:
                         ocr_candidates.append(
                             (width_px * height_px, digest, blob, image.content_type))
 
-                raw.append({"texts": slide_texts, "candidates": ocr_candidates})
+                raw.append({"texts": slide_texts, "candidates": ocr_candidates,
+                            "small": small_candidates})
 
             # ── 1.5단계: 여러 장에 반복되는 이미지는 템플릿 장식이다 — OCR 후보에서 뺀다.
             #    배경·배너가 넓이 상위 자리를 차지하면 내용 이미지가 읽히지 못한다(위 상수 주석).
@@ -144,7 +159,8 @@ class PptExtractor:
                     # 상위 3장에서 글자가 하나도 안 나오면 읽을 예비 후보 (아래 2차 라운드).
                     extra_images = ordered[_MAX_OCR_IMAGES_PER_SLIDE:_MAX_OCR_IMAGES_PER_SLIDE * 2]
 
-                pending.append({"texts": slide_texts, "images": images, "extra_images": extra_images})
+                pending.append({"texts": slide_texts, "images": images,
+                                "extra_images": extra_images, "small": entry["small"]})
 
             # ── 2단계: 모아둔 이미지를 한꺼번에 동시 호출한다.
             #    슬라이드를 하나씩 기다리면 이미지 30장짜리에서 2분이 걸린다(위 상수 주석 참고).
@@ -201,15 +217,25 @@ class PptExtractor:
             # 키(ANTHROPIC_API_KEY)가 없으면 claude_ocr가 조용히 빈 값을 돌려줘 3차로 넘어간다.
             if not self.claude_ocr.use_fallback:
                 for s_idx, entry in enumerate(pending):
-                    if entry["texts"] or not entry["images"]:
+                    # HCX 크기 기준에 걸러졌던 초소형 이미지(이름표류)는 Claude 경로에서만 읽는다.
+                    # 병합 루프가 인덱스로 훑도록 images 뒤에 이어 붙인다.
+                    entry["images"] = entry["images"] + entry["small"]
+                    gathered = "".join(entry["texts"]) + "".join(
+                        ocr_results.get((s_idx, j), "") for j in range(len(entry["images"])))
+                    # "빈 장"만이 아니라 "빈약한 장"(이름 한 줄 등 30자 미만)도 대상이다 —
+                    # 실측(2026-08-19): 2장은 "진순" 2자를 읽어 폴백을 못 탔고, 그 옆의
+                    # "반갑습니다…"와 "이화진"(초소형 이미지)은 HCX가 못 읽어 그대로 유실됐다.
+                    if len(gathered.replace(" ", "")) >= _THIN_TEXT_CHARS or not entry["images"]:
                         continue
-                    if any(ocr_results.get((s_idx, j)) for j in range(len(entry["images"]))):
-                        continue
+                    read_any = False
                     for j, (blob, content_type) in enumerate(entry["images"]):
+                        if ocr_results.get((s_idx, j)):
+                            continue   # HCX가 이미 읽은 이미지는 다시 안 읽는다
                         text = self.claude_ocr.extract_text_from_image(blob, content_type)
                         if text:
                             ocr_results[(s_idx, j)] = text
-                    if any(ocr_results.get((s_idx, j)) for j in range(len(entry["images"]))):
+                            read_any = True
+                    if read_any:
                         print(f"🔁 슬라이드 {s_idx + 1}: HCX가 못 읽은 글자를 Claude OCR이 읽었습니다.")
 
             # ── 3차: 그래도 글자가 없는 장은 "어떤 장면인지" 한 문장을 받아 [화면 묘사]로 저장.
