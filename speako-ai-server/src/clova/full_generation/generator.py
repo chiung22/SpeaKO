@@ -409,7 +409,10 @@ class FullScriptGenerator:
             f"{ppt_text}\n\n"
             f"원문이 빈약한 장: {numbers}\n\n"
             "위 장들 각각이 발표에서 어떤 역할의 장인지, 덱 전체 맥락으로 판단해주세요. "
-            "원문이 사람 이름으로 보이면 누구인지(발표자·팀원·고객 페르소나·캐릭터)까지. "
+            "판단 순서: ① 원문이 사람 이름으로 보이는가 — 그렇다면 누구인지"
+            "(발표자·팀원·고객 페르소나·캐릭터)를 밝히세요. ② 아니라면 앞뒤 장과의 관계로 "
+            "역할(제목·전환·강조·마무리 등)을 정하세요. "
+            "⚠️ 원문 단어에 새 의미를 지어 붙이지 마세요(예: 이름을 약어·구호로 재해석 금지). "
             "확실하지 않으면 '불명'이라고 쓰세요 — 추측으로 기능·제품이라 단정하지 마세요.\n"
             "출력은 설명 없이 아래 형식의 줄만:\n"
             "장번호: 역할 한 줄\n"
@@ -419,6 +422,7 @@ class FullScriptGenerator:
             "너는 발표 자료 분석가다. 장별 원문을 보고 각 장의 역할을 판단한다. "
             "지시된 출력 형식 외의 말은 하지 않는다.",
             user_prompt,
+            temperature=0.1,   # 판단 작업 — 다양성이 아니라 일관성이 필요하다 (위 _call_hcx 주석)
         )
         roles = {}
         for match in _ROLE_LINE.finditer(text or ""):
@@ -549,8 +553,13 @@ class FullScriptGenerator:
             return None
         return self._parse_toon_format(toon_text, valid_slide_numbers)
 
-    def _call_hcx(self, system_prompt, user_prompt):
-        """HCX 호출 공통부. 응답 본문 문자열을 돌려주고, 실패하면 None."""
+    def _call_hcx(self, system_prompt, user_prompt, temperature=0.5):
+        """HCX 호출 공통부. 응답 본문 문자열을 돌려주고, 실패하면 None.
+
+        temperature: 대본 생성은 0.5(표현 다양성). 역할 **분석**은 판단 작업이라 0.1 —
+        0.5로 돌리면 같은 덱에서 "발표자 이름"↔"불안 통계"로 판정이 널뛴다(2026-08-19 실측,
+        3회 중 1회 오판 → 대본이 "진순이란 진정성 있는 소통"이라는 지어내기로 이어짐).
+        """
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -565,7 +574,7 @@ class FullScriptGenerator:
             "topP": 0.8,
             "topK": 0,
             "maxTokens": 2000, # TOON 포맷으로 인해 필요 토큰 수가 대폭 줄어듭니다.
-            "temperature": 0.5,
+            "temperature": temperature,
             "repeatPenalty": 5.0
         }
 
