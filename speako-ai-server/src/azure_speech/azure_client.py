@@ -207,13 +207,35 @@ class PronunciationEvaluator:
 
             log_azure_speech_call(audio_seconds, "success")
 
+            # 완성도는 Azure 값을 쓰지 않고 대본 전체 기준으로 직접 계산한다.
+            #
+            # 왜: 대본 뒷부분을 통째로 안 읽으면 그 부분은 인식 세그먼트 자체가 안 만들어져서,
+            # Azure의 세그먼트별 완성도에는 아예 반영되지 않는다. 실측(2026-08-19): 대본의
+            # 일부만 읽었는데 완성도 88 → 종합 90으로 부풀려짐. 8/13처럼 중간중간 건너뛴
+            # 경우(세그먼트 매칭이 잡힘)에만 40대로 제대로 깎였다 — 즉 "어떻게 안 읽었는지"에
+            # 따라 점수가 달라지는 비일관 지표라, 읽힌 단어 수 ÷ 대본 전체 단어 수로 통일한다.
+            spoken_ref_words = sum(
+                1 for w in words_data if w.get("error_type") not in ("Omission", "Insertion")
+            )
+            total_ref_words = len(reference_text.split())
+            if total_ref_words > 0:
+                completeness = round(min(100.0, spoken_ref_words / total_ref_words * 100), 1)
+            else:
+                completeness = weighted_avg("completeness")
+
+            accuracy = weighted_avg("accuracy")
+            fluency = weighted_avg("fluency")
+            # 종합도 재계산한 완성도로 다시 만든다(가중치는 Azure 문서의 miscue 모드 공식).
+            # Azure가 준 종합을 그대로 두면 부풀린 완성도가 그 안에 이미 녹아 있다.
+            pronunciation_score = round(0.4 * accuracy + 0.2 * fluency + 0.4 * completeness, 1)
+
             return {
                 "status": "success",
                 "overall_scores": {
-                    "accuracy": weighted_avg("accuracy"),
-                    "fluency": weighted_avg("fluency"),
-                    "completeness": weighted_avg("completeness"),
-                    "pronunciation_score": weighted_avg("pronunciation_score")
+                    "accuracy": accuracy,
+                    "fluency": fluency,
+                    "completeness": completeness,
+                    "pronunciation_score": pronunciation_score
                 },
                 "recognized_text": " ".join(recognized_segments).strip(),
                 "words_detail": words_data
