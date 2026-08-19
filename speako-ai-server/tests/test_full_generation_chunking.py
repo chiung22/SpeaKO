@@ -736,3 +736,21 @@ def test_pledge_endings_are_stripped():
     ]
     for src_text, expected in cases:
         assert strip(src_text) == expected, src_text
+
+
+def test_pledge_paraphrases_are_also_stripped():
+    """금지하니 표현만 바꿔 재등장한 변형들(2026-08-19 실측 3차)."""
+    from clova.full_generation.generator import _strip_transition_ending as strip
+
+    cases = [
+        "발음 오류를 잡아냅니다. 더 자연스러운 소통 경험을 제공할 것을 약속드립니다.",
+        "규칙을 연습할 수 있습니다. 이러한 기능이 여러분의 언어 능력 향상에 큰 도움이 되기를 바랍니다.",
+        "무료 플랜이 있습니다. 저희 서비스가 여러분의 자신감을 높여드리겠습니다.",
+        "차별화된 강점입니다. 여러분의 발표 능력 향상에 큰 도움을 드리겠습니다.",
+        "의견을 기다립니다. 이를 기반으로 서비스를 지속적으로 발전시키겠습니다.",
+        "핵심 기능입니다. 지금 바로 SpeaKO 서비스를 체험해보시기 바랍니다.",
+        "걱정을 덜 수 있습니다. SpeaKO와 함께 성공적인 발표를 만들어보세요.",
+    ]
+    for text in cases:
+        result = strip(text)
+        assert result == text.split(". ")[0] + ".", f"{text!r} -> {result!r}"
