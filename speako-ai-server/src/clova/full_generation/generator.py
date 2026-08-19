@@ -210,6 +210,21 @@ _TRANSITION_UNIT = (
     r"|[^.!?]*(?:넘어가|이어가|진행하)(?:도록\s*하)?겠습니다"
     # "계속해서 주목해/집중해/함께해 주세요(주시기 바랍니다)"
     r"|[^.!?]*(?:주목|집중|함께)\s*해\s*주[^.!?]*"
+    # ── 다짐·약속형 맺음 (사용자 피드백 2026-08-19 2차: "이런 거 넣지 말라고 했잖아.
+    #    슬라이드 연결 부분인데 왜 굳이. 마지막 슬라이드에 한 번만.") ──
+    # "앞으로도 ~를 위해 최선을 다하겠습니다 / 발전시켜 나갈 예정입니다"
+    r"|앞으로도?\s[^.!?]*"
+    # "~에 최선을 다하겠습니다", "~하도록 도와드리겠습니다"
+    r"|[^.!?]*최선을 다하[^.!?]*"
+    r"|[^.!?]*도와드리(?:도록\s*하)?겠습니다"
+    # "지속적으로 발전시켜 나가겠습니다"
+    r"|[^.!?]*발전시켜\s*나가[^.!?]*"
+    # "계속해서 저희의 이야기를 지켜봐 주시기를 바랍니다"
+    r"|[^.!?]*지켜봐\s*주시[^.!?]*"
+    # "여러분의 발표 능력 향상에 큰 도움이 될 것입니다", "든든한 힘이 될 것입니다"
+    r"|[^.!?]*(?:도움|힘)이 될 것입니다"
+    # "~하시기를/이루기를 기대합니다"
+    r"|[^.!?]*기대(?:합니다|하겠습니다)"
 )
 _TRANSITION_ENDING_PATTERN = re.compile(
     r"(?:(?:^|(?<=[.!?]))\s*(?:" + _TRANSITION_UNIT + r")[.!?]?\s*)+$"
@@ -263,12 +278,18 @@ _LEADING_GREETING_PATTERN = re.compile(
     r"^\s*(?:안녕하세요|안녕하십니까|반갑습니다)[,.!]?\s*(?:여러분[,.!]?\s*)?"
 )
 
+# 중간 장이 "오늘은 ~를 소개해 드리려고 합니다"로 발표를 새로 여는 경우(실측 2026-08-19:
+# 11·12장). '오늘은/오늘' 낱말만 벗기면 나머지 문장은 그대로 성립한다
+# ("오늘은 저희가 기획한…" → "저희가 기획한…"). '오늘날'은 건드리지 않는다.
+_LEADING_TODAY_PATTERN = re.compile(r"^\s*오늘(?:은|,)?\s+(?!날)")
+
 
 def _strip_leading_greeting(script):
-    """중간 슬라이드 첫머리의 여는 인사를 제거한다. 인사뿐이면 원문을 유지한다."""
+    """중간 슬라이드 첫머리의 여는 인사·'오늘은' 도입을 제거한다. 그뿐이면 원문을 유지한다."""
     if not script:
         return script
     stripped = _LEADING_GREETING_PATTERN.sub("", script, count=1).strip()
+    stripped = _LEADING_TODAY_PATTERN.sub("", stripped, count=1).strip()
     return stripped if stripped else script
 
 
@@ -716,7 +737,7 @@ class ScriptRefiner:
         self.endpoint = f"https://clovastudio.stream.ntruss.com/v3/chat-completions/{self.model_name}"
         self.use_fallback = _is_placeholder_key(self.api_key)
 
-    def refine_script(self, script_text, style="격식체"):
+    def refine_script(self, script_text, style="격식체", last_slide_number=None):
         """
         생성 단계와 같은 이유로(입력이 길면 모델이 슬라이드를 빠뜨리거나 줄글로 합쳐버림)
         긴 대본은 나눠서 다듬는다. 다듬은 결과에서 슬라이드가 사라졌으면 그 묶음은 초안을 그대로 쓴다.
@@ -726,7 +747,7 @@ class ScriptRefiner:
 
         blocks = _split_slide_blocks(script_text)
         if not blocks:
-            return self._refine_chunk(script_text, style)
+            return self._refine_chunk(script_text, style, last_slide_number)
 
         chunks = [blocks[start:start + REFINE_SLIDES_PER_REQUEST] for start in range(0, len(blocks), REFINE_SLIDES_PER_REQUEST)]
 
@@ -734,7 +755,7 @@ class ScriptRefiner:
         # refined_parts를 그대로 이어 붙여도 슬라이드 순서가 유지된다.
         def refine_one(chunk):
             chunk_text = "\n\n".join(block for _, block in chunk)
-            refined = self._refine_chunk(chunk_text, style)
+            refined = self._refine_chunk(chunk_text, style, last_slide_number)
             # 다듬다가 슬라이드를 잃어버렸거나 번호가 바뀌었으면 자연스러움보다 내용 보존이 우선이다.
             expected = [number for number, _ in chunk]
             if not refined or [number for number, _ in _split_slide_blocks(refined)] != expected:
@@ -749,7 +770,7 @@ class ScriptRefiner:
 
         return "\n\n".join(refined_parts)
 
-    def _refine_chunk(self, script_text, style):
+    def _refine_chunk(self, script_text, style, last_slide_number=None):
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -768,13 +789,30 @@ class ScriptRefiner:
         4. 각 슬라이드의 핵심 내용과 정보, 슬라이드 순서는 그대로 유지하세요. 새로운 정보를 추가하거나 빼지 마세요.
         5. "Slide N:" 라벨과 슬라이드 개수는 절대 바꾸지 마세요. 입력에 있던 슬라이드 번호를 그대로 유지하세요.
         6. 과도하게 길이를 늘리거나 줄이지 말고, 자연스러움 개선에만 집중하세요.
+        7. **장 끝의 다짐·약속·기대 문장을 삭제하세요** — "앞으로도 ~하겠습니다",
+           "최선을 다하겠습니다", "~에 큰 도움이 될 것입니다", "지속적으로 발전시켜
+           나가겠습니다", "~하시길 기대합니다" 같은 문장이 여러 장에 반복되면 발표가
+           장마다 끝나는 것처럼 들립니다. 이런 문장은 [마지막 장]에만 한 번 허용됩니다.
+        8. 중간 장이 "오늘은/오늘 ~"으로 발표를 새로 여는 것처럼 시작하면 그 도입부를
+           지우고 바로 내용부터 시작하게 고치세요.
+        9. 서비스·제품 이름 표기가 장마다 다르면(예: SpeaKO / SPEAKO / SKOACH) 덱에서
+           가장 대표적인 표기 하나로 통일하세요 — 이름이 갈리면 다른 프로젝트 얘기처럼 들립니다.
 
         출력은 반드시 입력과 동일하게 "Slide N: 내용" 형식의 줄들로만 구성하고, 다른 설명이나 안내 문구는 절대 덧붙이지 마세요.
         """
 
+        # 묶음 단위로 다듬으므로 "마지막 장"이 어느 번호인지 알려줘야 7번 규칙이 정확히 적용된다.
+        last_note = (
+            f"[마지막 장] Slide {int(last_slide_number)} — 이 장에만 마무리·다짐 문장을 허용합니다."
+            if last_slide_number is not None
+            else "[마지막 장] 이 묶음에는 없습니다 — 모든 장이 중간 장입니다."
+        )
+
         user_prompt = f"""
         [초안 대본]
         {script_text}
+
+        {last_note}
 
         [반드시 지킬 것 — 말투]
         {style_instruction(style)}

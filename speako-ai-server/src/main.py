@@ -26,7 +26,7 @@ import hmac
 from urllib.parse import quote
 
 # 1. 분리해둔 AI 클라이언트 모듈들 임포트
-from clova.full_generation.generator import FullScriptGenerator
+from clova.full_generation.generator import FullScriptGenerator, ScriptRefiner
 from clova.full_generation import generator as script_cleanup
 from clova.partial_generation.generator import PartialScriptGenerator
 from clova.feedback.generator import (
@@ -254,6 +254,12 @@ def _save_upload_with_limit(upload_file: UploadFile, dest_path: str, max_bytes: 
 # 4. 각 AI 모듈 객체 생성
 full_generator = FullScriptGenerator()
 partial_generator = PartialScriptGenerator()
+# 2차 리뷰(고도화) — 초안 전체를 다시 읽으며 상투 맺음·'오늘은' 재시작·이름 표기 불일치를
+# 다듬는다. 만들어져 있었지만 연결이 안 돼 있던 것을 2026-08-19에 파이프라인에 붙였다
+# (사용자 피드백: 다짐형 맺음이 장마다 반복, 12장이 SKOACH라 딴 프로젝트처럼 들림).
+# HCX 호출이 6장당 1회 추가된다(14장 = +3회). 끄려면 SCRIPT_REFINE_ENABLED=0.
+script_refiner = ScriptRefiner()
+_REFINE_ENABLED = os.getenv("SCRIPT_REFINE_ENABLED", "1") not in ("0", "false", "False")
 etri_analyzer = EtriLanguageAnalyzer()
 kiwi_analyzer = KiwiAnalyzer()
 g2p_converter = G2pConverter()
@@ -689,6 +695,37 @@ def _run_full_script_job(job_id, project_id, ppt_text, presentation_time, style,
         if not result or not result.get("slides"):
             job_store.fail_job(job_id, "대본 생성에 실패했습니다.")
             return
+
+        # ── 2차 리뷰: 덱 전체를 다시 읽으며 다듬는다. 실패하면 초안 그대로 간다(리뷰는 보너스다).
+        if _REFINE_ENABLED and not script_refiner.use_fallback:
+            try:
+                draft_slides = sorted(result["slides"], key=lambda s: int(s["slide_number"]))
+                numbers = [str(int(s["slide_number"])) for s in draft_slides]
+                last_number = int(numbers[-1])
+                draft_text = "\n\n".join(
+                    f"Slide {s['slide_number']}: {s['script']}" for s in draft_slides)
+                refined_text = script_refiner.refine_script(draft_text, style, last_number)
+                blocks = script_cleanup._split_slide_blocks(refined_text or "")
+                if blocks and [n for n, _ in blocks] == numbers:
+                    first_number = int(numbers[0])
+                    refined_slides = []
+                    for n, block in blocks:
+                        script = re.sub(r"^\s*Slide\s+\d+\s*:\s*", "", block).strip()
+                        if int(n) != last_number:
+                            script = script_cleanup.strip_closing_greeting(script)
+                            script = script_cleanup.strip_leading_closing(script)
+                            script = script_cleanup.strip_transition_ending(script)
+                            if int(n) != first_number:
+                                script = script_cleanup.strip_leading_greeting(script)
+                        refined_slides.append({"slide_number": n, "script": script})
+                    # 다듬다가 한 장이라도 비워 먹었으면 초안이 낫다.
+                    if all(s["script"] for s in refined_slides):
+                        result["slides"] = refined_slides
+                        print(f"  ✨ 2차 리뷰 적용: {len(refined_slides)}장")
+                else:
+                    print("  ⚠️ 2차 리뷰 결과의 장 구성이 초안과 달라 초안을 유지합니다.")
+            except Exception as refine_err:
+                print(f"  ⚠️ 2차 리뷰 실패(초안 유지): {refine_err}")
 
         project = db.get(models.Project, project_id)
         if not project:

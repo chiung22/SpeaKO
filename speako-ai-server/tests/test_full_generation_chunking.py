@@ -514,9 +514,14 @@ def test_middle_slide_leading_greeting_is_stripped():
     """중간 장의 '안녕하세요, 여러분.' 시작 — 프롬프트 금지로도 재발해 코드로 지운다(2026-08-19 실측: 12장)."""
     from clova.full_generation.generator import _strip_leading_greeting
 
+    # 인사에 이어 "오늘은"으로 발표를 새로 여는 것까지 벗긴다 (2026-08-19 2차 피드백: 11·12장).
     assert _strip_leading_greeting(
         "안녕하세요, 여러분. 오늘은 저희가 기획한 서비스에 대해 설명드리겠습니다."
-    ) == "오늘은 저희가 기획한 서비스에 대해 설명드리겠습니다."
+    ) == "저희가 기획한 서비스에 대해 설명드리겠습니다."
+    # '오늘날'은 내용이므로 건드리지 않는다.
+    assert _strip_leading_greeting(
+        "오늘날 많은 기업이 AI를 도입하고 있습니다."
+    ) == "오늘날 많은 기업이 AI를 도입하고 있습니다."
     assert _strip_leading_greeting("안녕하십니까. 본론입니다.") == "본론입니다."
     # 본문 중간의 인사말·인사 아닌 문장은 건드리지 않는다.
     assert _strip_leading_greeting("발표 첫머리에 안녕하세요라고 인사합니다.") == \
@@ -708,3 +713,26 @@ def test_informative_endings_survive_transition_strip():
     # 예고 멘트뿐인 대본은 원문 유지(빈 대본 방지).
     only = "자세히 설명드리겠습니다."
     assert strip(only) == only
+
+
+def test_pledge_endings_are_stripped():
+    """다짐·약속형 맺음 — 2차 피드백(2026-08-19): "이런 거 넣지 말라고 했잖아.
+    슬라이드 연결 부분인데 왜 굳이. 마지막 슬라이드에 한 번만."."""
+    from clova.full_generation.generator import _strip_transition_ending as strip
+
+    cases = [
+        ("핵심 기능 세 가지를 갖췄습니다. 앞으로도 여러분의 발표 역량 강화를 위해 최선을 다하겠습니다.",
+         "핵심 기능 세 가지를 갖췄습니다."),
+        ("발음 오류를 잡아냅니다. 이를 통해 누구나 효과적인 발표를 할 수 있도록 도와드리겠습니다.",
+         "발음 오류를 잡아냅니다."),
+        ("무료 플랜으로 시작할 수 있습니다. 앞으로 더 많은 사용자들에게 편리한 서비스를 제공하기 위해 지속적으로 발전시켜 나갈 예정입니다.",
+         "무료 플랜으로 시작할 수 있습니다."),
+        ("경쟁사와의 차별점입니다. 이러한 부분들이 여러분의 발표 능력 향상에 큰 도움이 될 것입니다.",
+         "경쟁사와의 차별점입니다."),
+        ("서비스 개요였습니다. 계속해서 저희의 이야기를 지켜봐 주시기를 바랍니다.",
+         "서비스 개요였습니다."),
+        ("타깃층을 넓혀갈 계획입니다. 성공적인 커뮤니케이션을 이루기를 기대합니다.",
+         "타깃층을 넓혀갈 계획입니다."),
+    ]
+    for src_text, expected in cases:
+        assert strip(src_text) == expected, src_text
