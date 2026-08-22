@@ -14,3 +14,5 @@
 - Azure Speech Pronunciation Assessment 채점 기준 문서
 - Naver Clova Voice Premium TTS 파라미터 가이드
 - (프론트엔드 합류 시) 디자인 시스템 레퍼런스
+
+- [아키텍처 회고 및 보완책](아키텍처_회고_및_보완책.md) — 시연까지의 실제 구조·실측 병목·보완책·운영 사고·다음 프로젝트 체크리스트 (2026-08-22)
